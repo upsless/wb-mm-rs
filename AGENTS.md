@@ -59,7 +59,7 @@ The intended daemon has three async parts:
   calls.
 - Wiren Board MQTT frontend: device/control creation, initial value publishing,
   user control change observation, and cleanup on shutdown.
-- Dispatcher/business logic: receives events, owns high-level state decisions,
+- Tresher/business logic: receives events, owns high-level state decisions,
   and sends commands to DBus or MQTT handlers.
 
 Important reference behavior: the old project uses MQTT Last Will to force the

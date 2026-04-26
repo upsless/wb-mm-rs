@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{debug, info};
 use zbus::{
     Connection, Proxy,
@@ -9,6 +12,7 @@ use zbus::{
     fdo::{DBusProxy, InterfacesAddedStream, InterfacesRemovedStream, ObjectManagerProxy},
     names::BusName,
     proxy::{Builder as ProxyBuilder, CacheProperties, PropertyStream},
+    zvariant::OwnedObjectPath,
 };
 
 use crate::dbus::logics;
@@ -25,6 +29,7 @@ struct ActiveModemManagerState {
     object_manager: ObjectManagerProxy<'static>,
     interfaces_added: InterfacesAddedStream,
     interfaces_removed: InterfacesRemovedStream,
+    modem_tasks: HashMap<logics::ModemId, JoinHandle<()>>,
 }
 
 /// Owns the DBus-side lifecycle:
@@ -67,10 +72,11 @@ pub async fn run(
     let mut mm_version_changes = None;
     let mut mm_interfaces_added = None;
     let mut mm_interfaces_removed = None;
+    let mut mm_modem_tasks = None;
     let mut mm_modem_count_known = false;
 
     if mm_status == logics::ModemManagerStatus::Active {
-        let state = activate_modemmanager_state(&connection).await?;
+        let state = activate_modemmanager_state(&connection, &event_tx).await?;
         install_active_state(
             state,
             &mut mm_snapshot,
@@ -78,6 +84,7 @@ pub async fn run(
             &mut mm_version_changes,
             &mut mm_interfaces_added,
             &mut mm_interfaces_removed,
+            &mut mm_modem_tasks,
         );
         mm_modem_count_known = false;
         sync_modem_count(
@@ -134,11 +141,12 @@ pub async fn run(
                     &mut mm_version_changes,
                     &mut mm_interfaces_added,
                     &mut mm_interfaces_removed,
+                    &mut mm_modem_tasks,
                 );
                 mm_modem_count_known = false;
 
                 if mm_status == logics::ModemManagerStatus::Active {
-                    let state = activate_modemmanager_state(&connection).await?;
+                    let state = activate_modemmanager_state(&connection, &event_tx).await?;
                     install_active_state(
                         state,
                         &mut mm_snapshot,
@@ -146,6 +154,7 @@ pub async fn run(
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
                         &mut mm_interfaces_removed,
+                        &mut mm_modem_tasks,
                     );
                     sync_modem_count(
                         mm_snapshot.as_mut(),
@@ -182,6 +191,7 @@ pub async fn run(
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
                         &mut mm_interfaces_removed,
+                        &mut mm_modem_tasks,
                     );
                     mm_modem_count_known = false;
                     continue;
@@ -193,29 +203,40 @@ pub async fn run(
                 {
                     snapshot.version = version;
                     info!("{}", logics::modemmanager_snapshot_message(snapshot));
+                    emit_event(
+                        &event_tx,
+                        DbusEvent::Snapshot {
+                            version: snapshot.version.clone(),
+                            modem_count: snapshot.modem_count,
+                        },
+                    )
+                    .await;
                 }
             }
             // ModemManager exports modems as ObjectManager child objects rather
             // than as a root "modem count" property. We therefore filter
             // add/remove signals by the modem interface and then re-read the
             // ObjectManager tree for the exact current count.
-            touches_modem = async {
+            added_modem = async {
                 let Some(interfaces_added) = mm_interfaces_added.as_mut() else {
-                    return Ok::<Option<bool>, anyhow::Error>(None);
+                    return Ok::<Option<Option<logics::ModemId>>, anyhow::Error>(None);
                 };
                 let Some(signal) = interfaces_added.next().await else {
-                    return Ok::<Option<bool>, anyhow::Error>(None);
+                    return Ok::<Option<Option<logics::ModemId>>, anyhow::Error>(None);
                 };
                 let args = signal
                     .args()
                     .context("failed to parse ModemManager InterfacesAdded signal")?;
-                Ok(Some(
-                    args.interfaces_and_properties()
-                        .keys()
-                        .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE),
-                ))
+                let touches_modem = args
+                    .interfaces_and_properties()
+                    .keys()
+                    .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE);
+                if !touches_modem {
+                    return Ok(Some(None));
+                }
+                Ok(Some(logics::modem_id_from_path(args.object_path().as_str())))
             }, if mm_interfaces_added.is_some() => {
-                let Some(touches_modem) = touches_modem? else {
+                let Some(added_modem) = added_modem? else {
                     debug!(
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_ADDED_SIGNAL)
@@ -226,12 +247,21 @@ pub async fn run(
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
                         &mut mm_interfaces_removed,
+                        &mut mm_modem_tasks,
                     );
                     mm_modem_count_known = false;
                     continue;
                 };
 
-                if touches_modem {
+                if let Some(modem_id) = added_modem {
+                    if let Some(modem_tasks) = mm_modem_tasks.as_mut()
+                        && !modem_tasks.contains_key(&modem_id)
+                    {
+                        modem_tasks.insert(
+                            modem_id.clone(),
+                            spawn_modem_task(&connection, modem_id, event_tx.clone()),
+                        );
+                    }
                     sync_modem_count(
                         mm_snapshot.as_mut(),
                         mm_object_manager.as_ref(),
@@ -241,23 +271,26 @@ pub async fn run(
                     .await?;
                 }
             }
-            touches_modem = async {
+            removed_modem = async {
                 let Some(interfaces_removed) = mm_interfaces_removed.as_mut() else {
-                    return Ok::<Option<bool>, anyhow::Error>(None);
+                    return Ok::<Option<Option<logics::ModemId>>, anyhow::Error>(None);
                 };
                 let Some(signal) = interfaces_removed.next().await else {
-                    return Ok::<Option<bool>, anyhow::Error>(None);
+                    return Ok::<Option<Option<logics::ModemId>>, anyhow::Error>(None);
                 };
                 let args = signal
                     .args()
                     .context("failed to parse ModemManager InterfacesRemoved signal")?;
-                Ok(Some(
-                    args.interfaces()
-                        .iter()
-                        .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE),
-                ))
+                let touches_modem = args
+                    .interfaces()
+                    .iter()
+                    .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE);
+                if !touches_modem {
+                    return Ok(Some(None));
+                }
+                Ok(Some(logics::modem_id_from_path(args.object_path().as_str())))
             }, if mm_interfaces_removed.is_some() => {
-                let Some(touches_modem) = touches_modem? else {
+                let Some(removed_modem) = removed_modem? else {
                     debug!(
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_REMOVED_SIGNAL)
@@ -268,12 +301,20 @@ pub async fn run(
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
                         &mut mm_interfaces_removed,
+                        &mut mm_modem_tasks,
                     );
                     mm_modem_count_known = false;
                     continue;
                 };
 
-                if touches_modem {
+                if let Some(modem_id) = removed_modem {
+                    if let Some(modem_tasks) = mm_modem_tasks.as_mut()
+                        && let Some(task) = modem_tasks.remove(&modem_id)
+                    {
+                        task.abort();
+                    }
+                    info!("{}", logics::modem_deleted_message(&modem_id));
+                    emit_event(&event_tx, DbusEvent::ModemDeleted { modem_id }).await;
                     sync_modem_count(
                         mm_snapshot.as_mut(),
                         mm_object_manager.as_ref(),
@@ -348,7 +389,10 @@ async fn query_modemmanager_status(
 /// We subscribe to `ObjectManager` signals first and only then ask for the
 /// current object set. That mirrors the intended python-style flow: first arm
 /// change detection, then take the initial count snapshot.
-async fn activate_modemmanager_state(connection: &Connection) -> Result<ActiveModemManagerState> {
+async fn activate_modemmanager_state(
+    connection: &Connection,
+    event_tx: &mpsc::Sender<DbusEvent>,
+) -> Result<ActiveModemManagerState> {
     let mm_proxy: Proxy<'static> = ProxyBuilder::new(connection)
         .destination(logics::MM_BUS_NAME)
         .context("failed to set ModemManager proxy destination")?
@@ -383,6 +427,7 @@ async fn activate_modemmanager_state(connection: &Connection) -> Result<ActiveMo
         .receive_interfaces_removed()
         .await
         .context("failed to subscribe to ModemManager InterfacesRemoved signal")?;
+    let modem_tasks = spawn_initial_modem_tasks(connection, &object_manager, event_tx).await?;
 
     Ok(ActiveModemManagerState {
         snapshot: logics::ModemManagerSnapshot {
@@ -393,6 +438,7 @@ async fn activate_modemmanager_state(connection: &Connection) -> Result<ActiveMo
         object_manager,
         interfaces_added,
         interfaces_removed,
+        modem_tasks,
     })
 }
 
@@ -468,12 +514,14 @@ fn install_active_state(
     mm_version_changes: &mut Option<PropertyStream<'static, String>>,
     mm_interfaces_added: &mut Option<InterfacesAddedStream>,
     mm_interfaces_removed: &mut Option<InterfacesRemovedStream>,
+    mm_modem_tasks: &mut Option<HashMap<logics::ModemId, JoinHandle<()>>>,
 ) {
     *mm_snapshot = Some(state.snapshot);
     *mm_object_manager = Some(state.object_manager);
     *mm_version_changes = Some(state.version_changes);
     *mm_interfaces_added = Some(state.interfaces_added);
     *mm_interfaces_removed = Some(state.interfaces_removed);
+    *mm_modem_tasks = Some(state.modem_tasks);
 }
 
 fn clear_active_state(
@@ -482,12 +530,311 @@ fn clear_active_state(
     mm_version_changes: &mut Option<PropertyStream<'static, String>>,
     mm_interfaces_added: &mut Option<InterfacesAddedStream>,
     mm_interfaces_removed: &mut Option<InterfacesRemovedStream>,
+    mm_modem_tasks: &mut Option<HashMap<logics::ModemId, JoinHandle<()>>>,
 ) {
     *mm_snapshot = None;
     *mm_object_manager = None;
     *mm_version_changes = None;
     *mm_interfaces_added = None;
     *mm_interfaces_removed = None;
+    if let Some(tasks) = mm_modem_tasks.take() {
+        for (_, task) in tasks {
+            task.abort();
+        }
+    }
+}
+
+async fn query_modem_ids(object_manager: &ObjectManagerProxy<'_>) -> Result<Vec<logics::ModemId>> {
+    let managed_objects = object_manager
+        .get_managed_objects()
+        .await
+        .context("failed to read ModemManager managed objects")?;
+
+    Ok(managed_objects
+        .iter()
+        .filter(|(_, interfaces)| {
+            interfaces
+                .keys()
+                .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE)
+        })
+        .filter_map(|(path, _)| logics::modem_id_from_path(path.as_str()))
+        .collect())
+}
+
+async fn spawn_initial_modem_tasks(
+    connection: &Connection,
+    object_manager: &ObjectManagerProxy<'_>,
+    event_tx: &mpsc::Sender<DbusEvent>,
+) -> Result<HashMap<logics::ModemId, JoinHandle<()>>> {
+    let mut modem_tasks = HashMap::new();
+    for modem_id in query_modem_ids(object_manager).await? {
+        modem_tasks.insert(
+            modem_id.clone(),
+            spawn_modem_task(connection, modem_id, event_tx.clone()),
+        );
+    }
+    Ok(modem_tasks)
+}
+
+fn spawn_modem_task(
+    connection: &Connection,
+    modem_id: logics::ModemId,
+    event_tx: mpsc::Sender<DbusEvent>,
+) -> JoinHandle<()> {
+    let connection = connection.clone();
+    tokio::spawn(async move {
+        if let Err(err) = run_modem_task(connection, modem_id.clone(), event_tx).await {
+            debug!("Modem {} watcher failed: {err:#}", modem_id.0);
+        }
+    })
+}
+
+async fn run_modem_task(
+    connection: Connection,
+    modem_id: logics::ModemId,
+    event_tx: mpsc::Sender<DbusEvent>,
+) -> Result<()> {
+    let modem_path = logics::modem_path_from_id(&modem_id);
+    let modem_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set modem proxy destination")?
+        .path(modem_path.as_str())
+        .context("failed to set modem proxy path")?
+        .interface(logics::MM_MODEM_INTERFACE)
+        .context("failed to set modem proxy interface")?
+        .cache_properties(CacheProperties::Yes)
+        .build()
+        .await
+        .with_context(|| format!("failed to create modem proxy for {}", modem_id.0))?;
+
+    let mut model_changes = modem_proxy
+        .receive_property_changed::<String>("Model")
+        .await;
+    let mut revision_changes = modem_proxy
+        .receive_property_changed::<String>("Revision")
+        .await;
+    let mut primary_sim_slot_changes = modem_proxy
+        .receive_property_changed::<u32>("PrimarySimSlot")
+        .await;
+    let mut state_changes = modem_proxy.receive_property_changed::<i32>("State").await;
+    let mut signal_quality_changes = modem_proxy
+        .receive_property_changed::<(u32, bool)>("SignalQuality")
+        .await;
+    let mut sim_changes = modem_proxy
+        .receive_property_changed::<OwnedObjectPath>("Sim")
+        .await;
+
+    let mut snapshot = query_modem_snapshot(&connection, &modem_proxy).await?;
+
+    info!("{}", logics::modem_found_message(&modem_id));
+    emit_event(
+        &event_tx,
+        DbusEvent::ModemFound {
+            modem_id: modem_id.clone(),
+        },
+    )
+    .await;
+
+    info!("{}", logics::modem_snapshot_message(&modem_id, &snapshot));
+    emit_event(
+        &event_tx,
+        DbusEvent::ModemSnapshot {
+            modem_id: modem_id.clone(),
+            snapshot: snapshot.clone(),
+        },
+    )
+    .await;
+
+    loop {
+        tokio::select! {
+            change = model_changes.next() => {
+                let Some(change) = change else { break; };
+                let model = change
+                    .get()
+                    .await
+                    .context("failed to read modem Model property change")?;
+                if snapshot.model.as_deref() != Some(model.as_str()) {
+                    snapshot.model = Some(model.clone());
+                    emit_modem_update(&event_tx, &modem_id, logics::ModemUpdate::Model(model))
+                        .await;
+                }
+            }
+            change = revision_changes.next() => {
+                let Some(change) = change else { break; };
+                let revision = change
+                    .get()
+                    .await
+                    .context("failed to read modem Revision property change")?;
+                if snapshot.revision.as_deref() != Some(revision.as_str()) {
+                    snapshot.revision = Some(revision.clone());
+                    emit_modem_update(
+                        &event_tx,
+                        &modem_id,
+                        logics::ModemUpdate::Revision(revision),
+                    )
+                    .await;
+                }
+            }
+            change = primary_sim_slot_changes.next() => {
+                let Some(change) = change else { break; };
+                let primary_sim_slot = change
+                    .get()
+                    .await
+                    .context("failed to read modem PrimarySimSlot property change")?;
+                if snapshot.primary_sim_slot != Some(primary_sim_slot) {
+                    snapshot.primary_sim_slot = Some(primary_sim_slot);
+                    emit_modem_update(
+                        &event_tx,
+                        &modem_id,
+                        logics::ModemUpdate::PrimarySimSlot(primary_sim_slot),
+                    )
+                    .await;
+                }
+            }
+            change = state_changes.next() => {
+                let Some(change) = change else { break; };
+                let state = Some(
+                    logics::modem_state_name(
+                        change
+                            .get()
+                            .await
+                            .context("failed to read modem State property change")?,
+                    )
+                    .to_string(),
+                );
+                if snapshot.state != state {
+                    snapshot.state = state.clone();
+                    emit_modem_update(&event_tx, &modem_id, logics::ModemUpdate::State(state))
+                        .await;
+                }
+            }
+            change = signal_quality_changes.next() => {
+                let Some(change) = change else { break; };
+                let signal_quality = Some(
+                    change
+                        .get()
+                        .await
+                        .context("failed to read modem SignalQuality property change")?
+                        .0,
+                );
+                if snapshot.signal_quality != signal_quality {
+                    snapshot.signal_quality = signal_quality;
+                    emit_modem_update(
+                        &event_tx,
+                        &modem_id,
+                        logics::ModemUpdate::SignalQuality(signal_quality),
+                    )
+                    .await;
+                }
+            }
+            change = sim_changes.next() => {
+                let Some(change) = change else { break; };
+                let sim_path = change
+                    .get()
+                    .await
+                    .context("failed to read modem Sim property change")?;
+                let operator_name = query_operator_name(&connection, sim_path).await?;
+                if snapshot.operator_name != operator_name {
+                    snapshot.operator_name = operator_name.clone();
+                    emit_modem_update(
+                        &event_tx,
+                        &modem_id,
+                        logics::ModemUpdate::OperatorName(operator_name),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn query_modem_snapshot(
+    connection: &Connection,
+    modem_proxy: &Proxy<'_>,
+) -> Result<logics::ModemSnapshot> {
+    let model: String = modem_proxy
+        .get_property("Model")
+        .await
+        .context("failed to read modem Model property")?;
+    let revision: String = modem_proxy
+        .get_property("Revision")
+        .await
+        .context("failed to read modem Revision property")?;
+    let primary_sim_slot: u32 = modem_proxy
+        .get_property("PrimarySimSlot")
+        .await
+        .context("failed to read modem PrimarySimSlot property")?;
+    let state: i32 = modem_proxy
+        .get_property("State")
+        .await
+        .context("failed to read modem State property")?;
+    let signal_quality: (u32, bool) = modem_proxy
+        .get_property("SignalQuality")
+        .await
+        .context("failed to read modem SignalQuality property")?;
+    let sim_path: OwnedObjectPath = modem_proxy
+        .get_property("Sim")
+        .await
+        .context("failed to read modem Sim property")?;
+
+    Ok(logics::ModemSnapshot {
+        is_active: true,
+        model: Some(model),
+        revision: Some(revision),
+        state: Some(logics::modem_state_name(state).to_string()),
+        primary_sim_slot: Some(primary_sim_slot),
+        operator_name: query_operator_name(connection, sim_path).await?,
+        signal_quality: Some(signal_quality.0),
+    })
+}
+
+async fn query_operator_name(
+    connection: &Connection,
+    sim_path: OwnedObjectPath,
+) -> Result<Option<String>> {
+    if sim_path.as_str() == "/" {
+        return Ok(None);
+    }
+
+    let sim_proxy: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set SIM proxy destination")?
+        .path(sim_path.as_str())
+        .context("failed to set SIM proxy path")?
+        .interface(logics::MM_SIM_INTERFACE)
+        .context("failed to set SIM proxy interface")?
+        .build()
+        .await
+        .context("failed to create SIM proxy")?;
+
+    let operator_name: String = sim_proxy
+        .get_property("OperatorName")
+        .await
+        .context("failed to read SIM OperatorName property")?;
+
+    if operator_name.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(operator_name))
+    }
+}
+
+async fn emit_modem_update(
+    event_tx: &mpsc::Sender<DbusEvent>,
+    modem_id: &logics::ModemId,
+    update: logics::ModemUpdate,
+) {
+    info!("{}", logics::modem_update_message(modem_id, &update));
+    emit_event(
+        event_tx,
+        DbusEvent::ModemUpdated {
+            modem_id: modem_id.clone(),
+            update,
+        },
+    )
+    .await;
 }
 
 /// Small helper used by both MQTT and DBus loops.

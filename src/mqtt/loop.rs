@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::{debug, info};
 
-use crate::dbus::ModemManagerStatus;
+use crate::dbus::{ModemManagerStatus, ModemSnapshot, ModemUpdate};
 use crate::exchange::MqttCommand;
 use crate::mqtt::logics;
 
@@ -58,6 +58,30 @@ fn handle_command(command: MqttCommand) {
                 logics::mqtt_publish_mm_modem_count_message(modem_count)
             );
         }
+        MqttCommand::EnsureModemDevice { modem_id } => {
+            info!("{}", logics::mqtt_ensure_modem_device_message(&modem_id.0));
+        }
+        MqttCommand::PublishModemSnapshot { modem_id, snapshot } => {
+            info!(
+                "{}",
+                logics::mqtt_publish_modem_snapshot_message(
+                    &modem_id.0,
+                    &format_modem_snapshot(&snapshot),
+                )
+            );
+        }
+        MqttCommand::PublishModemUpdate { modem_id, update } => {
+            info!(
+                "{}",
+                logics::mqtt_publish_modem_update_message(
+                    &modem_id.0,
+                    &format_modem_update(&update),
+                )
+            );
+        }
+        MqttCommand::DeleteModemDevice { modem_id } => {
+            info!("{}", logics::mqtt_delete_modem_device_message(&modem_id.0));
+        }
     }
 }
 
@@ -67,6 +91,14 @@ fn modemmanager_status_name(status: ModemManagerStatus) -> &'static str {
         ModemManagerStatus::Inactive => "inactive",
         ModemManagerStatus::NotFound => "not_found",
     }
+}
+
+fn format_modem_snapshot(snapshot: &ModemSnapshot) -> String {
+    snapshot.summary()
+}
+
+fn format_modem_update(update: &ModemUpdate) -> String {
+    update.summary()
 }
 
 /// Mirrors the DBus loop helper so both subsystems react to shutdown in the

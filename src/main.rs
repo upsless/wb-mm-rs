@@ -1,8 +1,8 @@
 mod cli;
 mod dbus;
-mod dispatcher;
 mod exchange;
 mod mqtt;
+mod tresher;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -18,10 +18,12 @@ use crate::cli::Cli;
 const DBUS_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const DBUS_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const DBUS_RECONNECT_FAST_ATTEMPTS: u32 = 24;
+const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
 
 const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
+const MQTT_COMMAND_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,15 +90,11 @@ async fn run_supervisor(
             return Ok(());
         }
 
-        let (dbus_event_tx, dbus_event_rx) = mpsc::channel(32);
-        let (mqtt_command_tx, mqtt_command_rx) = mpsc::channel(32);
+        let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
+        let (mqtt_command_tx, mqtt_command_rx) = mpsc::channel(MQTT_COMMAND_CHANNEL_CAPACITY);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
         let mut mqtt_task = tokio::spawn(mqtt::run(mqtt_stop_rx.clone(), mqtt_command_rx));
-        let dispatcher_task = tokio::spawn(dispatcher::run(
-            mqtt_stop_rx,
-            dbus_event_rx,
-            mqtt_command_tx,
-        ));
+        let tresher_task = tokio::spawn(tresher::run(mqtt_stop_rx, dbus_event_rx, mqtt_command_tx));
 
         match run_dbus_lifecycle(
             dbus_address.clone(),
@@ -108,12 +106,12 @@ async fn run_supervisor(
         .await?
         {
             SupervisorExit::Shutdown => {
-                stop_child_task("Dispatcher", mqtt_stop_tx.clone(), dispatcher_task).await?;
+                stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
                 return Ok(());
             }
             SupervisorExit::MqttEnded => {
-                stop_child_task("Dispatcher", mqtt_stop_tx.clone(), dispatcher_task).await?;
+                stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 let delay = reconnect_delay(
                     mqtt_retry_attempt,
                     MQTT_RECONNECT_FAST_INTERVAL,

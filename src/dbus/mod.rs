@@ -2,7 +2,7 @@ mod logics;
 mod r#loop;
 
 use anyhow::Result;
-pub use logics::ModemManagerStatus;
+pub use logics::{ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 

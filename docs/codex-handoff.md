@@ -22,7 +22,7 @@ Planned async components:
 - DBus handler: ModemManager discovery, DBus events, and method calls.
 - MQTT handler: Wiren Board device/control creation, value publishing, user
   writes, cleanup, and Last Will setup.
-- Dispatcher: business logic, state decisions, and routing commands between
+- Tresher: business logic, state decisions, and routing commands between
   DBus and MQTT handlers.
 - MQTT lifecycle supervisor: MQTT is the primary lifecycle gate. If MQTT is
   disconnected, DBus work must be stopped completely until MQTT reconnects.
@@ -96,8 +96,8 @@ Planned async components:
   Use lightweight `dbus/logics.rs` and `mqtt/logics.rs` style modules rather
   than a general-purpose framework.
 - Stage 0.2 now includes an explicit event/command exchange path:
-  - DBus emits manager-level events into a dispatcher;
-  - the dispatcher keeps small last-published state and translates DBus events
+  - DBus emits manager-level events into a tresher;
+  - the tresher keeps small last-published state and translates DBus events
     into MQTT commands;
   - the MQTT side is still a stub, but it now receives structured commands and
     logs their "execution" instead of logging only raw lifecycle.
@@ -107,7 +107,7 @@ Planned async components:
 - Current logging split for stage 0.2:
   - `info`: meaningful DBus-side ModemManager events and MQTT-side command
     execution results;
-  - `debug`: dispatcher-internal event/command routing and lower-level
+  - `debug`: tresher-internal event/command routing and lower-level
     lifecycle details.
 
 ## Known Reference Findings
@@ -139,7 +139,7 @@ Planned async components:
      `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`.
 2. Build out stage 0.2 from manager-level exchange to richer mappings:
    - add the next DBus event shapes needed for per-modem and SMS work;
-   - expand dispatcher command routing beyond the ModemManager manager device;
+   - expand tresher command routing beyond the ModemManager manager device;
    - keep the event/command types compact and reviewable, following the small
      manager-level shape borrowed from the python reference.
 3. Implement stage 1:
@@ -156,4 +156,4 @@ Planned async components:
 2. Per-modem device with basic characteristics, DBus/MQTT/daemon failure
    behavior, cleanup, Last Will checks, and unit tests.
 3. SMS data: counts, last SMS time, SMS viewing in modem device, and unit tests.
-4. MQTT-to-DBus user actions routed through dispatcher, with unit tests.
+4. MQTT-to-DBus user actions routed through tresher, with unit tests.

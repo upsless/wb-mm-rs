@@ -1,11 +1,13 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
-use crate::dbus::ModemManagerStatus;
+use crate::dbus::{ModemId, ModemManagerStatus};
 use crate::exchange::{DbusEvent, MqttCommand};
 
-/// Minimal "hammer mill" that translates DBus events into MQTT commands.
+/// Minimal tresher that translates DBus events into MQTT commands.
 ///
 /// This stays deliberately stateful but small: we remember only the last
 /// manager values we published so the MQTT side receives clean, intentional
@@ -15,7 +17,7 @@ pub async fn run(
     mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
     mqtt_command_tx: mpsc::Sender<MqttCommand>,
 ) -> Result<()> {
-    let mut state = DispatchState::default();
+    let mut state = TresherState::default();
 
     loop {
         tokio::select! {
@@ -28,8 +30,8 @@ pub async fn run(
                     break;
                 };
 
-                debug!("Dispatcher received DBus event: {event:?}");
-                dispatch_event(event, &mut state, &mqtt_command_tx).await?;
+                debug!("Tresher received DBus event: {event:?}");
+                route_event(event, &mut state, &mqtt_command_tx).await?;
             }
         }
     }
@@ -38,16 +40,17 @@ pub async fn run(
 }
 
 #[derive(Debug, Default)]
-struct DispatchState {
+struct TresherState {
     device_announced: bool,
     last_status: Option<ModemManagerStatus>,
     last_version: Option<String>,
     last_modem_count: Option<usize>,
+    modem_devices: HashSet<ModemId>,
 }
 
-async fn dispatch_event(
+async fn route_event(
     event: DbusEvent,
-    state: &mut DispatchState,
+    state: &mut TresherState,
     mqtt_command_tx: &mpsc::Sender<MqttCommand>,
 ) -> Result<()> {
     ensure_device(state, mqtt_command_tx).await?;
@@ -104,13 +107,42 @@ async fn dispatch_event(
                 state.last_modem_count = Some(modem_count);
             }
         }
+        DbusEvent::ModemFound { modem_id } => {
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+        }
+        DbusEvent::ModemSnapshot { modem_id, snapshot } => {
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_command(
+                mqtt_command_tx,
+                MqttCommand::PublishModemSnapshot { modem_id, snapshot },
+            )
+            .await?;
+        }
+        DbusEvent::ModemUpdated { modem_id, update } => {
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_command(
+                mqtt_command_tx,
+                MqttCommand::PublishModemUpdate { modem_id, update },
+            )
+            .await?;
+        }
+        DbusEvent::ModemDeleted { modem_id } => {
+            send_command(
+                mqtt_command_tx,
+                MqttCommand::DeleteModemDevice {
+                    modem_id: modem_id.clone(),
+                },
+            )
+            .await?;
+            state.modem_devices.remove(&modem_id);
+        }
     }
 
     Ok(())
 }
 
 async fn ensure_device(
-    state: &mut DispatchState,
+    state: &mut TresherState,
     mqtt_command_tx: &mpsc::Sender<MqttCommand>,
 ) -> Result<()> {
     if !state.device_announced {
@@ -121,13 +153,31 @@ async fn ensure_device(
     Ok(())
 }
 
+async fn ensure_modem_device(
+    state: &mut TresherState,
+    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
+    modem_id: &ModemId,
+) -> Result<()> {
+    if state.modem_devices.insert(modem_id.clone()) {
+        send_command(
+            mqtt_command_tx,
+            MqttCommand::EnsureModemDevice {
+                modem_id: modem_id.clone(),
+            },
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 async fn send_command(
     mqtt_command_tx: &mpsc::Sender<MqttCommand>,
     command: MqttCommand,
 ) -> Result<()> {
-    debug!("Dispatcher queued MQTT command: {command:?}");
+    debug!("Tresher queued MQTT command: {command:?}");
     if mqtt_command_tx.send(command).await.is_err() {
-        debug!("MQTT command channel closed while dispatcher was sending");
+        debug!("MQTT command channel closed while tresher was sending");
     }
 
     Ok(())
