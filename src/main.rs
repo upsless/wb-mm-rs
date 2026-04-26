@@ -19,16 +19,27 @@ async fn main() -> Result<()> {
 
     info!("Starting wb-mm-mqtt");
 
+    // `watch` is our simplest "global shutdown flag": one sender in `main`,
+    // many receivers in background tasks. Each task can both read the current
+    // flag value and asynchronously wait until it changes.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    // Tokio tasks are lightweight async jobs. Here we keep one task per
+    // subsystem so `main` stays focused on orchestration.
     let mut mqtt_task = tokio::spawn(mqtt::run(shutdown_rx.clone()));
     let mut dbus_task = tokio::spawn(dbus::run(cli.dbus_address.clone(), shutdown_rx));
 
+    // Under a normal terminal `Ctrl+C` turns into SIGINT; under VS Code
+    // `Shift+F5`/Stop reaches us as SIGTERM because of `gracefulShutdown`.
     let mut sigint =
         signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
 
+    // `tokio::select!` waits for whichever async branch completes first.
+    // In our case that is either:
+    // - a shutdown signal from the OS/debugger, or
+    // - an unexpected early exit of one of the background tasks.
     tokio::select! {
         _ = sigint.recv() => {
             info!("SIGINT received");
@@ -67,6 +78,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Turn a `JoinHandle<Result<...>>` into a plain `Result`.
+///
+/// Tokio separates:
+/// - task execution failure (`JoinError`): task panicked or was aborted;
+/// - business failure (`Result<()>`): task finished but returned an error.
 fn task_result(
     name: &str,
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
@@ -76,6 +92,8 @@ fn task_result(
         .with_context(|| format!("{name} task failed"))
 }
 
+/// Keep logging setup in one place so the rest of the daemon can just use
+/// `debug!/info!/error!` without worrying about subscribers and filters.
 fn init_logging() -> Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

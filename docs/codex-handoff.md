@@ -66,6 +66,11 @@ Planned async components:
 - For VS Code debugging, the reliable shutdown path is `Shift+F5` / `Stop`
   with `gracefulShutdown: "SIGTERM"` in the local `.vscode/launch.json`.
   If graceful shutdown hangs, use `Stop` again to force termination.
+- Stage 0 now captures ModemManager DBus state in three buckets:
+  `Active`, `Inactive`, and `NotFound`.
+- The initial state is logged after DBus connect, and further transitions are
+  tracked through `org.freedesktop.DBus` `NameOwnerChanged` subscription for
+  `org.freedesktop.ModemManager1`.
 - Keep the daemon core compact in `main.rs` while it still reads cleanly from
   top to bottom. Split modules only when they gain an independent
   responsibility.
@@ -98,6 +103,8 @@ Planned async components:
      fits;
    - keep local debug runner defaults for remote DBus access through
      `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`;
+   - read and log more initial ModemManager data such as version and modem
+     count;
    - add focused tests around startup and shutdown wiring where practical.
 2. Implement stage 0.1:
    - DBus loop bus availability checks / health handling.
