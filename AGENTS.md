@@ -14,6 +14,10 @@ ModemManager integration.
 - After Rust code edits, run `cargo fmt --check`, `cargo clippy`, and
   `cargo test` where applicable.
 - Do not change the Wiren Board MQTT topic schema unless explicitly requested.
+- For new MQTT devices and controls, use current Wiren Board naming style:
+  lowercase words separated by underscores. Do not copy old CamelCase control
+  names or hyphenated device names from `wb-mm-mqtt` unless compatibility is
+  explicitly required.
 - For DBus code, preserve explicit destination, path, interface, and error
   context.
 - Preserve the old project's Last Will semantics: if the daemon disappears,
@@ -54,3 +58,7 @@ reworked to better fit current Wiren Board conventions.
 Reference mappings from the old project should be captured as compact
 configuration or mapping files, similar in spirit to `mqtt_logics.py` and
 `dbus_logics.py`, but without carrying over the old universal-library design.
+
+Known reference bug: `wb-mm-mqtt` modem cleanup appears to call
+`mqtt_del_control()` with the wrong argument count in `mqtt_delete_modem()`.
+Do not copy that implementation; keep it as a possible upstream/fork fix.

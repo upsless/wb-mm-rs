@@ -28,6 +28,22 @@ Open questions to resolve from the reference code:
 - logging structure worth preserving;
 - compact representation for DBus-to-MQTT bindings in Rust.
 
+Known issue in the Python implementation:
+
+- `mqtt_delete_modem()` appears to call `mqtt_del_control(target,
+  modem_mqtt_path, control)`, but `mqtt_del_control()` accepts only
+  `(target, control_path)`. Modem deletion may therefore fail and leave retained
+  topics behind. Do not copy this cleanup implementation into Rust; consider
+  fixing it later in the reference fork if useful.
+
+Naming note:
+
+- `wb-mm-mqtt` uses old-style topic/control names such as `mm-modem-1`,
+  `IsAvailable`, `ModemsCount`, and `SignalQuality`.
+- The new Rust daemon should use current Wiren Board conventions:
+  lowercase names with underscores and no punctuation/special characters,
+  unless explicit backward compatibility is required.
+
 ## Important Reference Behavior: Last Will Availability
 
 In `wb-mm-mqtt`, daemon death is intentionally surfaced through MQTT Last Will:

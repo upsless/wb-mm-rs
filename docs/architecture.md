@@ -79,3 +79,18 @@ should live in compact, easy-to-review mapping definitions.
 
 The exact Rust representation is still open. Prefer typed data structures or
 small declarative config over ad hoc string manipulation.
+
+## MQTT Naming
+
+Use current Wiren Board naming conventions for new topics:
+
+- device and control topic names should be lowercase;
+- separate words with underscores;
+- avoid punctuation and special characters;
+- do not carry over old names such as `mm-modem-1`, `IsAvailable`,
+  `ModemsCount`, or `SignalQuality` unless an explicit compatibility mode is
+  added.
+
+The new daemon should probably expose names shaped like `modemmanager`,
+`mm_modem_1`, `is_available`, `modems_count`, and `signal_quality`, with final
+names chosen as part of the mapping design.
