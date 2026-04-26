@@ -24,6 +24,8 @@ Planned async components:
   writes, cleanup, and Last Will setup.
 - Dispatcher: business logic, state decisions, and routing commands between
   DBus and MQTT handlers.
+- MQTT lifecycle supervisor: MQTT is the primary lifecycle gate. If MQTT is
+  disconnected, DBus work must be stopped completely until MQTT reconnects.
 
 ## Important Decisions
 
@@ -43,6 +45,11 @@ Planned async components:
 - Keep DBus/MQTT mappings compact and reviewable, similar in spirit to
   `mqtt_logics.py` and `dbus_logics.py`, without the old universal library
   structure.
+- Production logs should be quiet after debugging: startup, shutdown, unhandled
+  errors, and important unrecoverable conditions. Development logs should be
+  very detailed, at least as useful as `wb-mm-mqtt` logs.
+- On MQTT loss, stop DBus subscriptions/work and drop live runtime state. After
+  MQTT reconnect, republish metadata and perform fresh DBus discovery.
 
 ## Known Reference Findings
 
@@ -66,9 +73,18 @@ Planned async components:
 
 1. Rename/open workspace as `wb-mm-rs`.
 2. Scaffold the Rust project.
-3. Decide initial MQTT device/control mapping names.
-4. Implement the first minimal slice:
-   - MQTT device/control metadata for ModemManager availability;
-   - MQTT Last Will unavailable state;
-   - DBus connection to ModemManager on `wb.loc`;
-   - dispatcher event for availability/version.
+3. Implement stage 1:
+   - MQTT + DBus + ModemManager device;
+   - version and modem count controls;
+   - correct MQTT updates on modem connect/disconnect;
+   - correct behavior when ModemManager service is stopped, started, or removed
+     on `wb.loc`;
+   - focused unit tests.
+
+## Roadmap
+
+1. ModemManager device with version/modem count and service/modem change tests.
+2. Per-modem device with basic characteristics, DBus/MQTT/daemon failure
+   behavior, cleanup, Last Will checks, and unit tests.
+3. SMS data: counts, last SMS time, SMS viewing in modem device, and unit tests.
+4. MQTT-to-DBus user actions routed through dispatcher, with unit tests.
