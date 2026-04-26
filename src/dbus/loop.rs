@@ -9,7 +9,14 @@ pub async fn run(
     dbus_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let connection = connect(dbus_address.as_deref()).await?;
+    let connection = tokio::select! {
+        result = connect(dbus_address.as_deref()) => result?,
+        result = wait_for_shutdown(&mut shutdown_rx) => {
+            result?;
+            info!("{}", logics::dbus_stopped_before_connect_message());
+            return Ok(());
+        }
+    };
 
     info!("{}", logics::dbus_connected_message());
 
@@ -41,6 +48,8 @@ async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()
             return Ok(());
         }
 
-        shutdown_rx.changed().await?;
+        if shutdown_rx.changed().await.is_err() {
+            return Ok(());
+        }
     }
 }

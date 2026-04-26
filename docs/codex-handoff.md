@@ -55,8 +55,17 @@ Planned async components:
   MQTT reconnect, republish metadata and perform fresh DBus discovery.
 - Stage 0 daemon startup uses `--dbus-address <ADDRESS>` for custom DBus
   connection. If the argument is not provided, use the system bus.
-- Stage 0 graceful shutdown uses `Ctrl+C`. Add Unix signal handling in a later
-  stage.
+- Current scaffold uses `zbus` 5.x because the development DBus address relies
+  on `unixexec:` transport (`ssh ... systemd-stdio-bridge`), which did not
+  work in the earlier setup.
+- The daemon now listens for both `SIGINT` and `SIGTERM` and shuts down MQTT
+  and DBus loops gracefully.
+- In a plain terminal, `Ctrl+C` works as expected. In VS Code CodeLLDB debug
+  sessions, `Ctrl+C` in the debug terminal is unreliable and may kill the
+  process before graceful shutdown logs appear.
+- For VS Code debugging, the reliable shutdown path is `Shift+F5` / `Stop`
+  with `gracefulShutdown: "SIGTERM"` in the local `.vscode/launch.json`.
+  If graceful shutdown hangs, use `Stop` again to force termination.
 - Keep the daemon core compact in `main.rs` while it still reads cleanly from
   top to bottom. Split modules only when they gain an independent
   responsibility.
@@ -87,8 +96,8 @@ Planned async components:
 1. Finish stage 0 scaffold refinement:
    - align log messages with useful `wb-mm-mqtt` reference wording where it
      fits;
-   - decide development runner defaults for remote DBus access through
-     `unixexec:path=ssh,argv1=-T,argv2=root@target,argv3=systemd-stdio-bridge`;
+   - keep local debug runner defaults for remote DBus access through
+     `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`;
    - add focused tests around startup and shutdown wiring where practical.
 2. Implement stage 0.1:
    - DBus loop bus availability checks / health handling.

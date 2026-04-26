@@ -20,6 +20,8 @@ async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()
             return Ok(());
         }
 
-        shutdown_rx.changed().await?;
+        if shutdown_rx.changed().await.is_err() {
+            return Ok(());
+        }
     }
 }
