@@ -31,6 +31,11 @@ ModemManager integration.
   ModemManager must be treated as unavailable for UI/control purposes. The
   MQTT availability control is a daemon capability marker, not just a cached
   DBus value.
+- For Rust code that uses async/Tokio or other non-obvious "Rusty"
+  constructions, prefer adding concise rustdoc comments on public items and
+  short inline comments around non-obvious control flow. Write them so a
+  threads-first reader can follow the code without reverse-engineering every
+  async primitive.
 
 ## Repository Topology
 

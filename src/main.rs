@@ -6,10 +6,19 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
-use tracing::{error, info};
+use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
+
+const DBUS_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
+const DBUS_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
+const DBUS_RECONNECT_FAST_ATTEMPTS: u32 = 24;
+
+const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
+const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
+const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,58 +33,160 @@ async fn main() -> Result<()> {
     // flag value and asynchronously wait until it changes.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Tokio tasks are lightweight async jobs. Here we keep one task per
-    // subsystem so `main` stays focused on orchestration.
-    let mut mqtt_task = tokio::spawn(mqtt::run(shutdown_rx.clone()));
-    let mut dbus_task = tokio::spawn(dbus::run(cli.dbus_address.clone(), shutdown_rx));
-
     // Under a normal terminal `Ctrl+C` turns into SIGINT; under VS Code
     // `Shift+F5`/Stop reaches us as SIGTERM because of `gracefulShutdown`.
     let mut sigint =
         signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
+    let mut supervisor_task = tokio::spawn(run_supervisor(cli.dbus_address.clone(), shutdown_rx));
 
     // `tokio::select!` waits for whichever async branch completes first.
     // In our case that is either:
     // - a shutdown signal from the OS/debugger, or
-    // - an unexpected early exit of one of the background tasks.
+    // - an unexpected supervisor exit.
     tokio::select! {
         _ = sigint.recv() => {
             info!("SIGINT received");
             info!("Termination requested");
             let _ = shutdown_tx.send(true);
-
-            task_result("MQTT", mqtt_task.await)?;
-            task_result("DBus", dbus_task.await)?;
         }
         _ = sigterm.recv() => {
             info!("SIGTERM received");
             info!("Termination requested");
             let _ = shutdown_tx.send(true);
-
-            task_result("MQTT", mqtt_task.await)?;
-            task_result("DBus", dbus_task.await)?;
         }
-        mqtt_result = &mut mqtt_task => {
-            let mqtt_result = task_result("MQTT", mqtt_result);
-            error!("MQTT loop exited before shutdown");
+        supervisor_result = &mut supervisor_task => {
+            let supervisor_result = task_result("Supervisor", supervisor_result);
             let _ = shutdown_tx.send(true);
-            task_result("DBus", dbus_task.await)?;
-            mqtt_result?;
-        }
-        dbus_result = &mut dbus_task => {
-            let dbus_result = task_result("DBus", dbus_result);
-            error!("DBus loop exited before shutdown");
-            let _ = shutdown_tx.send(true);
-            task_result("MQTT", mqtt_task.await)?;
-            dbus_result?;
+            supervisor_result?;
         }
     }
+
+    task_result("Supervisor", supervisor_task.await)?;
 
     info!("wb-mm-mqtt stopped");
 
     Ok(())
+}
+
+/// Supervises subsystem sessions according to the daemon lifecycle rules:
+/// - MQTT is the top-level gate;
+/// - DBus only runs while MQTT is alive;
+/// - each subsystem reconnects with its own retry cadence.
+async fn run_supervisor(
+    dbus_address: Option<String>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut mqtt_retry_attempt = 1;
+
+    loop {
+        if *shutdown_rx.borrow() {
+            return Ok(());
+        }
+
+        let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
+        let mut mqtt_task = tokio::spawn(mqtt::run(mqtt_stop_rx));
+
+        match run_dbus_lifecycle(
+            dbus_address.clone(),
+            &mut shutdown_rx,
+            &mqtt_stop_tx,
+            &mut mqtt_task,
+        )
+        .await?
+        {
+            SupervisorExit::Shutdown => {
+                stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
+                return Ok(());
+            }
+            SupervisorExit::MqttEnded => {
+                let delay = reconnect_delay(
+                    mqtt_retry_attempt,
+                    MQTT_RECONNECT_FAST_INTERVAL,
+                    MQTT_RECONNECT_SLOW_INTERVAL,
+                    MQTT_RECONNECT_FAST_ATTEMPTS,
+                );
+                info!(
+                    "MQTT connection lost, retrying in {} second(s) (attempt {}).",
+                    delay.as_secs(),
+                    mqtt_retry_attempt
+                );
+                mqtt_retry_attempt += 1;
+
+                if sleep_until_retry_or_shutdown(delay, &mut shutdown_rx).await? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Runs DBus sessions only while the current MQTT session is alive.
+///
+/// When DBus drops, we mark ModemManager as not found and retry only DBus.
+/// When MQTT drops, we stop DBus and hand control back to the outer loop so
+/// MQTT can reconnect first and DBus can then restart from a clean slate.
+async fn run_dbus_lifecycle(
+    dbus_address: Option<String>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    mqtt_stop_tx: &watch::Sender<bool>,
+    mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
+) -> Result<SupervisorExit> {
+    let mut dbus_retry_attempt = 1;
+
+    loop {
+        let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
+        let mut dbus_task = tokio::spawn(dbus::run(dbus_address.clone(), dbus_stop_rx));
+
+        let retry_delay = tokio::select! {
+            result = wait_for_shutdown(shutdown_rx) => {
+                result?;
+                stop_child_task("DBus", dbus_stop_tx, dbus_task).await?;
+                let _ = mqtt_stop_tx.send(true);
+                return Ok(SupervisorExit::Shutdown);
+            }
+            mqtt_result = &mut *mqtt_task => {
+                log_unexpected_task_exit("MQTT", mqtt_result)?;
+                info!("Stopping DBus because MQTT connection is unavailable.");
+                let _ = dbus_stop_tx.send(true);
+                stop_finished_or_stopping_task("DBus", dbus_task).await?;
+                return Ok(SupervisorExit::MqttEnded);
+            }
+            dbus_result = &mut dbus_task => {
+                log_unexpected_task_exit("DBus", dbus_result)?;
+                debug!("{}", dbus::modemmanager_not_found_message());
+
+                let delay = reconnect_delay(
+                    dbus_retry_attempt,
+                    DBUS_RECONNECT_FAST_INTERVAL,
+                    DBUS_RECONNECT_SLOW_INTERVAL,
+                    DBUS_RECONNECT_FAST_ATTEMPTS,
+                );
+                info!(
+                    "DBus connection lost, retrying in {} second(s) (attempt {}).",
+                    delay.as_secs(),
+                    dbus_retry_attempt
+                );
+                dbus_retry_attempt += 1;
+
+                delay
+            }
+        };
+
+        tokio::select! {
+            result = wait_for_shutdown(shutdown_rx) => {
+                result?;
+                let _ = mqtt_stop_tx.send(true);
+                return Ok(SupervisorExit::Shutdown);
+            }
+            mqtt_result = &mut *mqtt_task => {
+                log_unexpected_task_exit("MQTT", mqtt_result)?;
+                return Ok(SupervisorExit::MqttEnded);
+            }
+            _ = sleep(retry_delay) => {}
+        }
+    }
 }
 
 /// Turn a `JoinHandle<Result<...>>` into a plain `Result`.
@@ -90,6 +201,90 @@ fn task_result(
     result
         .with_context(|| format!("{name} task join failed"))?
         .with_context(|| format!("{name} task failed"))
+}
+
+/// For reconnectable child sessions we treat inner `Result` errors as normal
+/// lifecycle failures and retry them. A Tokio join failure still means
+/// something is wrong in the runtime/task itself, so we keep that fatal.
+fn log_unexpected_task_exit(
+    name: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => error!("{name} loop exited before shutdown."),
+        Ok(Err(err)) => error!("{name} loop failed: {err:#}"),
+        Err(join_error) => {
+            return Err(anyhow::anyhow!("{name} task join failed: {join_error}"));
+        }
+    }
+
+    Ok(())
+}
+
+async fn stop_child_task(
+    name: &str,
+    stop_tx: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    let _ = stop_tx.send(true);
+    stop_finished_or_stopping_task(name, task).await
+}
+
+async fn stop_finished_or_stopping_task(
+    name: &str,
+    task: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    match task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            error!("{name} loop ended while stopping: {err:#}");
+            Ok(())
+        }
+        Err(join_error) => Err(anyhow::anyhow!("{name} task join failed: {join_error}")),
+    }
+}
+
+fn reconnect_delay(
+    attempt: u32,
+    fast_interval: Duration,
+    slow_interval: Duration,
+    fast_attempts: u32,
+) -> Duration {
+    if attempt <= fast_attempts {
+        fast_interval
+    } else {
+        slow_interval
+    }
+}
+
+async fn sleep_until_retry_or_shutdown(
+    delay: Duration,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<bool> {
+    tokio::select! {
+        result = wait_for_shutdown(shutdown_rx) => {
+            result?;
+            Ok(true)
+        }
+        _ = sleep(delay) => Ok(false),
+    }
+}
+
+async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()> {
+    loop {
+        if *shutdown_rx.borrow() {
+            return Ok(());
+        }
+
+        if shutdown_rx.changed().await.is_err() {
+            return Ok(());
+        }
+    }
+}
+
+enum SupervisorExit {
+    Shutdown,
+    MqttEnded,
 }
 
 /// Keep logging setup in one place so the rest of the daemon can just use

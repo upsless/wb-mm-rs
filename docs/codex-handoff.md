@@ -60,6 +60,15 @@ Planned async components:
   work in the earlier setup.
 - The daemon now listens for both `SIGINT` and `SIGTERM` and shuts down MQTT
   and DBus loops gracefully.
+- A compact supervisor in `main.rs` now owns reconnect behavior:
+  - MQTT is the top-level lifecycle gate;
+  - DBus runs only while MQTT is connected;
+  - DBus reconnect retries use fast and slow intervals;
+  - MQTT reconnect retries use the same pattern with separate constants;
+  - on DBus session failure, ModemManager is treated as `NotFound` until the
+    bus connection returns;
+  - on MQTT loss, DBus is stopped first, and after MQTT reconnect both
+    subsystems start again from a clean slate.
 - In a plain terminal, `Ctrl+C` works as expected. In VS Code CodeLLDB debug
   sessions, `Ctrl+C` in the debug terminal is unreliable and may kill the
   process before graceful shutdown logs appear.
@@ -71,6 +80,15 @@ Planned async components:
 - The initial state is logged after DBus connect, and further transitions are
   tracked through `org.freedesktop.DBus` `NameOwnerChanged` subscription for
   `org.freedesktop.ModemManager1`.
+- When ModemManager is `Active`, stage 0 also logs a small snapshot:
+  `Version` and `modem_count`.
+- After ModemManager service restart on `wb.loc`, the DBus name may become
+  `Active` before the modem object list repopulates. The current stage-0 logic
+  therefore:
+  - arms `ObjectManager` watchers first;
+  - logs the initial snapshot with the current `modem_count`;
+  - later logs `ModemManager modem count changed: modem_count=...` when the
+    modem object list catches up.
 - Keep the daemon core compact in `main.rs` while it still reads cleanly from
   top to bottom. Split modules only when they gain an independent
   responsibility.
@@ -98,21 +116,18 @@ Planned async components:
 
 ## Next Likely Work
 
-1. Finish stage 0 scaffold refinement:
-   - align log messages with useful `wb-mm-mqtt` reference wording where it
-     fits;
+1. Clean up and harden the new supervisor/reconnect stage:
+   - add focused tests for reconnect backoff and lifecycle ordering where
+     practical;
+   - review whether reconnect log wording should be aligned even more closely
+     with `wb-mm-mqtt`;
    - keep local debug runner defaults for remote DBus access through
-     `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`;
-   - read and log more initial ModemManager data such as version and modem
-     count;
-   - add focused tests around startup and shutdown wiring where practical.
-2. Implement stage 0.1:
-   - DBus loop bus availability checks / health handling.
-3. Implement stage 1:
+     `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`.
+2. Implement stage 1:
    - MQTT + DBus + ModemManager device;
    - version and modem count controls;
    - correct MQTT updates on modem connect/disconnect;
-   - correct behavior when ModemManager service is stopped, started, or removed
+    - correct behavior when ModemManager service is stopped, started, or removed
      on `wb.loc`;
    - focused unit tests.
 
