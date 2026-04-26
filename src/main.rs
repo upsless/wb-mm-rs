@@ -1,10 +1,13 @@
 mod cli;
 mod dbus;
+mod dispatcher;
+mod exchange;
 mod mqtt;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
@@ -85,22 +88,32 @@ async fn run_supervisor(
             return Ok(());
         }
 
+        let (dbus_event_tx, dbus_event_rx) = mpsc::channel(32);
+        let (mqtt_command_tx, mqtt_command_rx) = mpsc::channel(32);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
-        let mut mqtt_task = tokio::spawn(mqtt::run(mqtt_stop_rx));
+        let mut mqtt_task = tokio::spawn(mqtt::run(mqtt_stop_rx.clone(), mqtt_command_rx));
+        let dispatcher_task = tokio::spawn(dispatcher::run(
+            mqtt_stop_rx,
+            dbus_event_rx,
+            mqtt_command_tx,
+        ));
 
         match run_dbus_lifecycle(
             dbus_address.clone(),
             &mut shutdown_rx,
             &mqtt_stop_tx,
             &mut mqtt_task,
+            dbus_event_tx,
         )
         .await?
         {
             SupervisorExit::Shutdown => {
+                stop_child_task("Dispatcher", mqtt_stop_tx.clone(), dispatcher_task).await?;
                 stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
                 return Ok(());
             }
             SupervisorExit::MqttEnded => {
+                stop_child_task("Dispatcher", mqtt_stop_tx.clone(), dispatcher_task).await?;
                 let delay = reconnect_delay(
                     mqtt_retry_attempt,
                     MQTT_RECONNECT_FAST_INTERVAL,
@@ -132,12 +145,17 @@ async fn run_dbus_lifecycle(
     shutdown_rx: &mut watch::Receiver<bool>,
     mqtt_stop_tx: &watch::Sender<bool>,
     mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
+    dbus_event_tx: mpsc::Sender<exchange::DbusEvent>,
 ) -> Result<SupervisorExit> {
     let mut dbus_retry_attempt = 1;
 
     loop {
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
-        let mut dbus_task = tokio::spawn(dbus::run(dbus_address.clone(), dbus_stop_rx));
+        let mut dbus_task = tokio::spawn(dbus::run(
+            dbus_address.clone(),
+            dbus_stop_rx,
+            dbus_event_tx.clone(),
+        ));
 
         let retry_delay = tokio::select! {
             result = wait_for_shutdown(shutdown_rx) => {
@@ -156,6 +174,15 @@ async fn run_dbus_lifecycle(
             dbus_result = &mut dbus_task => {
                 log_unexpected_task_exit("DBus", dbus_result)?;
                 debug!("{}", dbus::modemmanager_not_found_message());
+                if dbus_event_tx
+                    .send(exchange::DbusEvent::StatusChanged(
+                        dbus::ModemManagerStatus::NotFound,
+                    ))
+                    .await
+                    .is_err()
+                {
+                    debug!("DBus event channel closed while reporting NotFound");
+                }
 
                 let delay = reconnect_delay(
                     dbus_retry_attempt,

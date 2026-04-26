@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tracing::debug;
+use tracing::{debug, info};
 use zbus::{
     Connection, Proxy,
     connection::Builder,
@@ -11,6 +12,7 @@ use zbus::{
 };
 
 use crate::dbus::logics;
+use crate::exchange::DbusEvent;
 
 /// Active-only ModemManager watchers.
 ///
@@ -33,6 +35,7 @@ struct ActiveModemManagerState {
 pub async fn run(
     dbus_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
+    event_tx: mpsc::Sender<DbusEvent>,
 ) -> Result<()> {
     // Connecting to a remote DBus bridge may block for a while, so we race the
     // connection attempt against shutdown. This lets the daemon exit cleanly
@@ -56,7 +59,8 @@ pub async fn run(
         .context("failed to create org.freedesktop.DBus proxy")?;
 
     let mut mm_status = query_modemmanager_status(&dbus_proxy).await?;
-    debug!("{}", logics::modemmanager_status_message(mm_status));
+    info!("{}", logics::modemmanager_status_message(mm_status));
+    emit_event(&event_tx, DbusEvent::StatusChanged(mm_status)).await;
 
     let mut mm_snapshot = None;
     let mut mm_object_manager = None;
@@ -80,6 +84,7 @@ pub async fn run(
             mm_snapshot.as_mut(),
             mm_object_manager.as_ref(),
             &mut mm_modem_count_known,
+            &event_tx,
         )
         .await?;
     }
@@ -115,7 +120,12 @@ pub async fn run(
                 let new_status = query_modemmanager_status(&dbus_proxy).await?;
                 if new_status != mm_status {
                     mm_status = new_status;
-                    debug!("{}", logics::modemmanager_status_message(mm_status));
+                    info!("{}", logics::modemmanager_status_message(mm_status));
+                    emit_event(
+                        &event_tx,
+                        DbusEvent::StatusChanged(mm_status),
+                    )
+                    .await;
                 }
 
                 clear_active_state(
@@ -141,6 +151,7 @@ pub async fn run(
                         mm_snapshot.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
+                        &event_tx,
                     )
                     .await?;
                 }
@@ -181,7 +192,7 @@ pub async fn run(
                     && mm_modem_count_known
                 {
                     snapshot.version = version;
-                    debug!("{}", logics::modemmanager_snapshot_message(snapshot));
+                    info!("{}", logics::modemmanager_snapshot_message(snapshot));
                 }
             }
             // ModemManager exports modems as ObjectManager child objects rather
@@ -225,6 +236,7 @@ pub async fn run(
                         mm_snapshot.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
+                        &event_tx,
                     )
                     .await?;
                 }
@@ -266,6 +278,7 @@ pub async fn run(
                         mm_snapshot.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
+                        &event_tx,
                     )
                     .await?;
                 }
@@ -408,6 +421,7 @@ async fn sync_modem_count(
     snapshot: Option<&mut logics::ModemManagerSnapshot>,
     object_manager: Option<&ObjectManagerProxy<'_>>,
     modem_count_known: &mut bool,
+    event_tx: &mpsc::Sender<DbusEvent>,
 ) -> Result<()> {
     let Some(snapshot) = snapshot else {
         return Ok(());
@@ -420,16 +434,31 @@ async fn sync_modem_count(
     if !*modem_count_known {
         snapshot.modem_count = modem_count;
         *modem_count_known = true;
-        debug!("{}", logics::modemmanager_snapshot_message(snapshot));
+        info!("{}", logics::modemmanager_snapshot_message(snapshot));
+        emit_event(
+            event_tx,
+            DbusEvent::Snapshot {
+                version: snapshot.version.clone(),
+                modem_count,
+            },
+        )
+        .await;
     } else if snapshot.modem_count != modem_count {
         snapshot.modem_count = modem_count;
-        debug!(
+        info!(
             "{}",
             logics::modemmanager_modem_count_changed_message(modem_count)
         );
+        emit_event(event_tx, DbusEvent::ModemCountChanged { modem_count }).await;
     }
 
     Ok(())
+}
+
+async fn emit_event(event_tx: &mpsc::Sender<DbusEvent>, event: DbusEvent) {
+    if event_tx.send(event).await.is_err() {
+        debug!("DBus event channel closed while sending");
+    }
 }
 
 fn install_active_state(

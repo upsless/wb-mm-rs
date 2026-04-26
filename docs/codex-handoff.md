@@ -95,6 +95,20 @@ Planned async components:
 - Separate shared DBus/MQTT runtime code from concrete signal/topic mappings.
   Use lightweight `dbus/logics.rs` and `mqtt/logics.rs` style modules rather
   than a general-purpose framework.
+- Stage 0.2 now includes an explicit event/command exchange path:
+  - DBus emits manager-level events into a dispatcher;
+  - the dispatcher keeps small last-published state and translates DBus events
+    into MQTT commands;
+  - the MQTT side is still a stub, but it now receives structured commands and
+    logs their "execution" instead of logging only raw lifecycle.
+- The current stage-0.2 manager-level DBus events are intentionally compact:
+  `StatusChanged`, `Snapshot { version, modem_count }`, and
+  `ModemCountChanged`.
+- Current logging split for stage 0.2:
+  - `info`: meaningful DBus-side ModemManager events and MQTT-side command
+    execution results;
+  - `debug`: dispatcher-internal event/command routing and lower-level
+    lifecycle details.
 
 ## Known Reference Findings
 
@@ -123,7 +137,12 @@ Planned async components:
      with `wb-mm-mqtt`;
    - keep local debug runner defaults for remote DBus access through
      `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`.
-2. Implement stage 1:
+2. Build out stage 0.2 from manager-level exchange to richer mappings:
+   - add the next DBus event shapes needed for per-modem and SMS work;
+   - expand dispatcher command routing beyond the ModemManager manager device;
+   - keep the event/command types compact and reviewable, following the small
+     manager-level shape borrowed from the python reference.
+3. Implement stage 1:
    - MQTT + DBus + ModemManager device;
    - version and modem count controls;
    - correct MQTT updates on modem connect/disconnect;

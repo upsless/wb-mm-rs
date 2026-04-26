@@ -2,10 +2,18 @@ mod logics;
 mod r#loop;
 
 use anyhow::Result;
+pub use logics::ModemManagerStatus;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-pub async fn run(dbus_address: Option<String>, shutdown_rx: watch::Receiver<bool>) -> Result<()> {
-    r#loop::run(dbus_address, shutdown_rx).await
+use crate::exchange::DbusEvent;
+
+pub async fn run(
+    dbus_address: Option<String>,
+    shutdown_rx: watch::Receiver<bool>,
+    event_tx: mpsc::Sender<DbusEvent>,
+) -> Result<()> {
+    r#loop::run(dbus_address, shutdown_rx, event_tx).await
 }
 
 pub fn modemmanager_not_found_message() -> &'static str {
