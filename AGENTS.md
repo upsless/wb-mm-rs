@@ -11,6 +11,9 @@ ModemManager integration.
 - Do not read `.env`, secrets, keys, tokens, or private deployment files.
 - Prefer small, reviewable diffs.
 - Before broad refactors, explain the planned file-level changes.
+- Before any commit intended to be pushed to GitHub, review
+  `docs/codex-handoff.md` and update it if the commit changes project context,
+  decisions, workflow, known issues, or next steps.
 - After Rust code edits, run `cargo fmt --check`, `cargo clippy`, and
   `cargo test` where applicable.
 - Do not change the Wiren Board MQTT topic schema unless explicitly requested.
