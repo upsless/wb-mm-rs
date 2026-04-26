@@ -39,6 +39,8 @@ mapping ideas, and cleanup semantics, but not as a structural template.
 - Emits user actions to the dispatcher.
 - Removes or marks generated entities on daemon shutdown, according to the
   chosen Wiren Board behavior.
+- Sets MQTT Last Will so that an unexpected daemon stop marks ModemManager as
+  unavailable in the UI/control model.
 
 ### Dispatcher
 
@@ -52,6 +54,22 @@ The initial mental model is:
 ```text
 DBus events + MQTT user actions -> dispatcher state -> DBus/MQTT commands
 ```
+
+## Availability Semantics
+
+The ModemManager availability control is not merely a cached DBus property. It
+represents whether the daemon is alive and able to manage ModemManager, observe
+new SMS, and execute modem-related actions.
+
+The old `wb-mm-mqtt` project deliberately used MQTT Last Will to force this
+availability state to false/unavailable when the daemon disconnects
+unexpectedly. That behavior must be preserved. The exact new topic and payload
+should be chosen deliberately:
+
+- keep the UI-visible availability signal obvious;
+- avoid leaving stale "available" state after daemon death;
+- consider also publishing conventional `/meta/error` state if it helps
+  consumers that follow Wiren Board conventions strictly.
 
 ## Mapping Files
 

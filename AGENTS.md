@@ -16,6 +16,10 @@ ModemManager integration.
 - Do not change the Wiren Board MQTT topic schema unless explicitly requested.
 - For DBus code, preserve explicit destination, path, interface, and error
   context.
+- Preserve the old project's Last Will semantics: if the daemon disappears,
+  ModemManager must be treated as unavailable for UI/control purposes. The
+  MQTT availability control is a daemon capability marker, not just a cached
+  DBus value.
 
 ## Repository Topology
 
@@ -41,6 +45,11 @@ The intended daemon has three async parts:
   user control change observation, and cleanup on shutdown.
 - Dispatcher/business logic: receives events, owns high-level state decisions,
   and sends commands to DBus or MQTT handlers.
+
+Important reference behavior: the old project uses MQTT Last Will to force the
+ModemManager availability control into an unavailable state when the daemon
+dies. Keep this behavior in the new design, even if the exact topic/payload is
+reworked to better fit current Wiren Board conventions.
 
 Reference mappings from the old project should be captured as compact
 configuration or mapping files, similar in spirit to `mqtt_logics.py` and
