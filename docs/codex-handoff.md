@@ -53,6 +53,16 @@ Planned async components:
   very detailed, at least as useful as `wb-mm-mqtt` logs.
 - On MQTT loss, stop DBus subscriptions/work and drop live runtime state. After
   MQTT reconnect, republish metadata and perform fresh DBus discovery.
+- Stage 0 daemon startup uses `--dbus-address <ADDRESS>` for custom DBus
+  connection. If the argument is not provided, use the system bus.
+- Stage 0 graceful shutdown uses `Ctrl+C`. Add Unix signal handling in a later
+  stage.
+- Keep the daemon core compact in `main.rs` while it still reads cleanly from
+  top to bottom. Split modules only when they gain an independent
+  responsibility.
+- Separate shared DBus/MQTT runtime code from concrete signal/topic mappings.
+  Use lightweight `dbus/logics.rs` and `mqtt/logics.rs` style modules rather
+  than a general-purpose framework.
 
 ## Known Reference Findings
 
@@ -74,8 +84,14 @@ Planned async components:
 
 ## Next Likely Work
 
-1. Rename/open workspace as `wb-mm-rs`.
-2. Scaffold the Rust project.
+1. Finish stage 0 scaffold refinement:
+   - align log messages with useful `wb-mm-mqtt` reference wording where it
+     fits;
+   - decide development runner defaults for remote DBus access through
+     `unixexec:path=ssh,argv1=-T,argv2=root@target,argv3=systemd-stdio-bridge`;
+   - add focused tests around startup and shutdown wiring where practical.
+2. Implement stage 0.1:
+   - DBus loop bus availability checks / health handling.
 3. Implement stage 1:
    - MQTT + DBus + ModemManager device;
    - version and modem count controls;
