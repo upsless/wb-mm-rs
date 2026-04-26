@@ -1,0 +1,63 @@
+# Architecture Notes
+
+## Goal
+
+Build a specialized Rust daemon for Wiren Board devices that integrates
+ModemManager with the standard Wiren Board MQTT device/control model.
+
+The daemon should cover the practical use case:
+
+- discover ModemManager and modems;
+- publish state to MQTT;
+- update state from DBus events;
+- observe user control changes from MQTT;
+- call DBus methods for requested actions;
+- clean up created MQTT entities on shutdown.
+
+## Non-Goal
+
+Do not recreate the old `wb-mm-mqtt` universal library architecture. The old
+project is valuable as a reference for behavior, logging style, DBus/MQTT
+mapping ideas, and cleanup semantics, but not as a structural template.
+
+## Main Async Components
+
+### DBus Handler
+
+- Connects to ModemManager.
+- Performs initial discovery and state loading.
+- Subscribes to DBus events.
+- Executes DBus method calls requested by the dispatcher.
+- Emits domain events to the dispatcher.
+
+### MQTT Handler
+
+- Creates Wiren Board devices and controls.
+- Publishes initial metadata and values.
+- Publishes value updates from dispatcher commands.
+- Observes user writes to writable controls.
+- Emits user actions to the dispatcher.
+- Removes or marks generated entities on daemon shutdown, according to the
+  chosen Wiren Board behavior.
+
+### Dispatcher
+
+- Owns high-level daemon state.
+- Receives events from DBus and MQTT handlers.
+- Applies business rules.
+- Sends commands to DBus and MQTT handlers.
+
+The initial mental model is:
+
+```text
+DBus events + MQTT user actions -> dispatcher state -> DBus/MQTT commands
+```
+
+## Mapping Files
+
+The project should preserve the useful idea from `mqtt_logics.py` and
+`dbus_logics.py`: bindings between DBus entities and MQTT devices/controls
+should live in compact, easy-to-review mapping definitions.
+
+The exact Rust representation is still open. Prefer typed data structures or
+small declarative config over ad hoc string manipulation.
