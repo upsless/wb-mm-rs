@@ -32,6 +32,9 @@ Planned async components:
 - Before any commit intended to be pushed to GitHub, Codex should review this
   handoff file and update it if the commit changes project context, decisions,
   workflow, known issues, or next steps.
+- If the user says that a change should be committed only after confirmation,
+  Codex must not commit or push until the user explicitly grants that
+  permission in a later message.
 - Use current Wiren Board MQTT naming for new topics: lowercase words separated
   by underscores. Do not copy old names like `IsAvailable`, `ModemsCount`,
   `SignalQuality`, or `mm-modem-1` unless explicit compatibility is needed.

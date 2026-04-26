@@ -11,6 +11,10 @@ ModemManager integration.
 - Do not read `.env`, secrets, keys, tokens, or private deployment files.
 - Prefer small, reviewable diffs.
 - Before broad refactors, explain the planned file-level changes.
+- If the user says that a change should be committed only after confirmation
+  (for example, "commit only if I confirm" or "if I confirm, add it for future
+  agents"), do not commit or push until the user explicitly grants that
+  permission in a later message.
 - Before any commit intended to be pushed to GitHub, review
   `docs/codex-handoff.md` and update it if the commit changes project context,
   decisions, workflow, known issues, or next steps.
