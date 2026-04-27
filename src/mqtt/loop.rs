@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
-use crate::dbus::{ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsSnapshot};
+use crate::dbus::{self, ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsSnapshot};
 use crate::exchange::{MqttCommand, MqttEvent};
 use crate::mqtt::logics::{self, ControlSpec};
 
@@ -157,7 +157,7 @@ impl MqttFrontend {
             }
             MqttCommand::PublishModemManagerLastSms(last_sms) => {
                 self.ensure_manager_device().await?;
-                self.publish_optional_i64_control(
+                self.publish_optional_timestamp_text_control(
                     logics::MM_DEVICE_NAME,
                     logics::MM_CONTROL_LAST_SMS,
                     last_sms,
@@ -544,7 +544,7 @@ impl MqttFrontend {
 
         match snapshot {
             Some(snapshot) => {
-                self.publish_optional_i64_control(
+                self.publish_optional_timestamp_text_control(
                     &device_name,
                     logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
                     snapshot.timestamp,
@@ -681,15 +681,15 @@ impl MqttFrontend {
         .await
     }
 
-    async fn publish_optional_i64_control(
+    async fn publish_optional_timestamp_text_control(
         &self,
         device_name: &str,
         control_name: &str,
         value: Option<i64>,
     ) -> Result<()> {
-        match value {
+        match value.and_then(dbus::format_unix_timestamp_for_wb) {
             Some(value) => {
-                self.publish_number_control(device_name, control_name, value)
+                self.publish_text_control(device_name, control_name, &value)
                     .await
             }
             None => self.publish_null_control(device_name, control_name).await,

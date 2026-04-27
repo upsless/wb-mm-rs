@@ -356,3 +356,16 @@ pub fn parse_sms_timestamp_to_unix(timestamp: &str) -> Option<i64> {
         .ok()
         .map(|value| value.unix_timestamp())
 }
+
+pub fn format_unix_timestamp_for_wb(timestamp: i64) -> Option<String> {
+    let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+    ))
+}

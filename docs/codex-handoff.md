@@ -153,6 +153,10 @@ Planned async components:
   `MAIN`, `DBUS`, `MQTT`, and `DISP`.
 - SMS timestamp controls should use WB's dedicated unix-time control type:
   `meta/type=unixtime`, payload = integer unix time.
+  Update: current WB UI on the test board does not render that as a human
+  date for our custom controls, so SMS timestamps are temporarily published in
+  the same practical shape as `/devices/system/controls/Manufacturing Date`:
+  `meta/type=text`, payload like `YYYY-MM-DD HH:MM:SS`.
 
 ## Known Reference Findings
 
