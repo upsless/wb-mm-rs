@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
@@ -9,12 +10,8 @@ use crate::exchange::{DbusCommand, DbusEvent, MqttCommand, MqttEvent};
 
 const LOG_TARGET: &str = "DISP";
 
-/// Stateful business-logic bridge between DBus and MQTT.
-///
-/// The tresher keeps just enough cached state to:
-/// - aggregate manager-level values like total SMS count;
-/// - remember per-modem device numbering and selected SMS;
-/// - route user-originated MQTT selection changes back into DBus.
+/// Routes DBus and MQTT events, keeps per-modem state, and emits commands for
+/// the side that must act next.
 pub async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
@@ -81,7 +78,7 @@ struct TresherState {
     last_version: Option<String>,
     last_modem_count: Option<usize>,
     last_manager_sms_count: Option<usize>,
-    last_manager_last_sms: Option<Option<i64>>,
+    last_manager_last_sms: Option<Option<OffsetDateTime>>,
     modem_devices: HashSet<ModemId>,
     modems: HashMap<ModemId, ModemState>,
 }
@@ -90,8 +87,11 @@ struct TresherState {
 struct ModemState {
     sms: HashMap<SmsId, SmsSnapshot>,
     sms_order: Vec<SmsId>,
+    sms_count: usize,
+    last_sms_timestamp: Option<OffsetDateTime>,
     selected_sms_id: Option<SmsId>,
     last_sms_count: Option<usize>,
+    last_published_last_sms: Option<Option<OffsetDateTime>>,
     last_selected_index: Option<Option<u32>>,
     last_selected_max_index: Option<u32>,
     last_selected_writable: Option<bool>,
@@ -161,17 +161,22 @@ async fn route_dbus_event(
         DbusEvent::ModemFound { modem_id } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
             ensure_modem_state(state, &modem_id);
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
         }
         DbusEvent::ModemSnapshot { modem_id, snapshot } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
-            ensure_modem_state(state, &modem_id);
+            {
+                let modem_state = ensure_modem_state(state, &modem_id);
+                modem_state.sms_count = snapshot.sms_count;
+                modem_state.last_sms_timestamp = snapshot.last_sms_timestamp;
+                modem_state.last_sms_count = Some(snapshot.sms_count);
+                modem_state.last_published_last_sms = Some(snapshot.last_sms_timestamp);
+            }
             send_mqtt_command(
                 mqtt_command_tx,
                 MqttCommand::PublishModemSnapshot { modem_id, snapshot },
             )
             .await?;
+            sync_manager_sms_state(state, mqtt_command_tx).await?;
         }
         DbusEvent::ModemUpdated { modem_id, update } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
@@ -203,6 +208,7 @@ async fn route_dbus_event(
             let (selected_before, selection_missing) = {
                 let modem_state = ensure_modem_state(state, &modem_id);
                 modem_state.sms.insert(sms_id.clone(), snapshot);
+                refresh_modem_last_sms_from_known_highest(modem_state);
                 (
                     modem_state.selected_sms_id.as_ref() == Some(&sms_id),
                     modem_state.selected_sms_id.is_none(),
@@ -222,6 +228,8 @@ async fn route_dbus_event(
                 let modem_state = ensure_modem_state(state, &modem_id);
                 let had_any_sms_snapshots = !modem_state.sms.is_empty();
                 modem_state.sms_order = sms_ids;
+                modem_state.sms_count = modem_state.sms_order.len();
+                refresh_modem_last_sms_from_known_highest(modem_state);
 
                 if modem_state
                     .selected_sms_id
@@ -251,6 +259,7 @@ async fn route_dbus_event(
                     return Ok(());
                 };
                 apply_sms_update(snapshot, &update);
+                refresh_modem_last_sms_from_known_highest(modem_state);
                 modem_state.selected_sms_id.as_ref() == Some(&sms_id)
             };
             sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
@@ -263,9 +272,14 @@ async fn route_dbus_event(
         DbusEvent::SmsDeleted { modem_id, sms_id } => {
             let modem_state = ensure_modem_state(state, &modem_id);
             modem_state.sms.remove(&sms_id);
+            modem_state
+                .sms_order
+                .retain(|known_sms_id| known_sms_id != &sms_id);
+            modem_state.sms_count = modem_state.sms_order.len();
             if modem_state.selected_sms_id.as_ref() == Some(&sms_id) {
                 modem_state.selected_sms_id = None;
             }
+            recalculate_modem_last_sms_from_known_order(modem_state);
 
             sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
             sync_manager_sms_state(state, mqtt_command_tx).await?;
@@ -276,10 +290,17 @@ async fn route_dbus_event(
             sms_id,
             snapshot,
         } => {
-            let modem_state = ensure_modem_state(state, &modem_id);
-            modem_state.sms.insert(sms_id.clone(), snapshot);
+            let selected_now = {
+                let modem_state = ensure_modem_state(state, &modem_id);
+                modem_state.sms.insert(sms_id.clone(), snapshot);
+                refresh_modem_last_sms_from_known_highest(modem_state);
+                modem_state.selected_sms_id.as_ref() == Some(&sms_id)
+            };
 
-            if modem_state.selected_sms_id.as_ref() == Some(&sms_id) {
+            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
+            sync_manager_sms_state(state, mqtt_command_tx).await?;
+
+            if selected_now {
                 publish_selected_sms(state, mqtt_command_tx, &modem_id).await?;
             }
         }
@@ -359,13 +380,12 @@ async fn sync_manager_sms_state(
     let sms_count = state
         .modems
         .values()
-        .map(|modem_state| modem_state.sms_order.len())
+        .map(|modem_state| modem_state.sms_count)
         .sum::<usize>();
     let last_sms = state
         .modems
         .values()
-        .flat_map(|modem_state| modem_state.sms.values())
-        .filter_map(|snapshot| snapshot.timestamp)
+        .filter_map(|modem_state| modem_state.last_sms_timestamp)
         .max();
 
     if state.last_manager_sms_count != Some(sms_count) {
@@ -398,7 +418,7 @@ async fn sync_modem_sms_state(
         return Ok(());
     };
 
-    let sms_count = modem_state.sms_order.len();
+    let sms_count = modem_state.sms_count;
     if modem_state.last_sms_count != Some(sms_count) {
         send_mqtt_command(
             mqtt_command_tx,
@@ -409,6 +429,18 @@ async fn sync_modem_sms_state(
         )
         .await?;
         modem_state.last_sms_count = Some(sms_count);
+    }
+
+    if modem_state.last_published_last_sms != Some(modem_state.last_sms_timestamp) {
+        send_mqtt_command(
+            mqtt_command_tx,
+            MqttCommand::PublishModemLastSms {
+                modem_id: modem_id.clone(),
+                last_sms_timestamp: modem_state.last_sms_timestamp,
+            },
+        )
+        .await?;
+        modem_state.last_published_last_sms = Some(modem_state.last_sms_timestamp);
     }
 
     if modem_state.selected_sms_id.is_none() {
@@ -523,6 +555,30 @@ async fn publish_selected_sms(
     }
 
     Ok(())
+}
+
+fn refresh_modem_last_sms_from_known_highest(modem_state: &mut ModemState) {
+    if modem_state.sms_order.is_empty() {
+        modem_state.last_sms_timestamp = None;
+        return;
+    }
+
+    let Some(highest_sms_id) = modem_state.sms_order.last() else {
+        return;
+    };
+
+    if let Some(snapshot) = modem_state.sms.get(highest_sms_id) {
+        modem_state.last_sms_timestamp = snapshot.timestamp;
+    }
+}
+
+fn recalculate_modem_last_sms_from_known_order(modem_state: &mut ModemState) {
+    modem_state.last_sms_timestamp = modem_state.sms_order.iter().rev().find_map(|sms_id| {
+        modem_state
+            .sms
+            .get(sms_id)
+            .and_then(|snapshot| snapshot.timestamp)
+    });
 }
 
 fn apply_sms_update(snapshot: &mut SmsSnapshot, update: &SmsUpdate) {

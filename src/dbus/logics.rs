@@ -65,10 +65,7 @@ pub const MM_SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
 pub const MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
 pub const MM_SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
 
-/// Small, reviewable state model for stage 0.
-///
-/// We intentionally keep this separate from the async runtime code so the
-/// policy ("how we interpret DBus facts") stays easy to test and read.
+/// DBus availability state derived from the ModemManager service name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModemManagerStatus {
     Active,
@@ -76,8 +73,7 @@ pub enum ModemManagerStatus {
     NotFound,
 }
 
-/// Initial ModemManager data we want to see at stage 0 before building any
-/// MQTT-facing state.
+/// Manager-level snapshot read after connecting to ModemManager.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModemManagerSnapshot {
     pub version: String,
@@ -92,7 +88,7 @@ pub struct ModemId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SmsId(pub String);
 
-/// Full modem snapshot we want to route through the tresher before SMS work.
+/// Full modem snapshot read before subscribing to live modem changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModemSnapshot {
     pub is_active: bool,
@@ -102,12 +98,14 @@ pub struct ModemSnapshot {
     pub primary_sim_slot: Option<u32>,
     pub operator_name: Option<String>,
     pub signal_quality: Option<u32>,
+    pub sms_count: usize,
+    pub last_sms_timestamp: Option<OffsetDateTime>,
 }
 
 impl ModemSnapshot {
     pub fn summary(&self) -> String {
         format!(
-            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
+            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}, sms_count={}, last_sms={}",
             self.is_active,
             format_option_string(self.model.as_deref()),
             format_option_string(self.revision.as_deref()),
@@ -115,11 +113,13 @@ impl ModemSnapshot {
             format_option_u32(self.primary_sim_slot),
             format_option_string(self.operator_name.as_deref()),
             format_option_u32(self.signal_quality),
+            self.sms_count,
+            format_option_timestamp(self.last_sms_timestamp),
         )
     }
 }
 
-/// Single-field modem update used for property-change driven events.
+/// Single modem-property update emitted from live DBus property changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModemUpdate {
     Model(String),
@@ -149,15 +149,11 @@ impl ModemUpdate {
     }
 }
 
-/// Full SMS snapshot for one incoming message.
-///
-/// We keep the MQTT-facing fields already normalized here:
-/// - `timestamp` is unix time for WB `unixtime` controls;
-/// - `is_received` tells the UI whether the message is complete yet.
+/// Full SMS snapshot for one incoming ModemManager SMS object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmsSnapshot {
     pub is_received: bool,
-    pub timestamp: Option<i64>,
+    pub timestamp: Option<OffsetDateTime>,
     pub number: Option<String>,
     pub text: Option<String>,
 }
@@ -167,18 +163,18 @@ impl SmsSnapshot {
         format!(
             "is_received={}, timestamp={}, sender={}, text={}",
             self.is_received,
-            format_option_i64(self.timestamp),
+            format_option_timestamp(self.timestamp),
             format_option_string(self.number.as_deref()),
             format_text_summary(self.text.as_deref()),
         )
     }
 }
 
-/// Single-field SMS update used for property-change events.
+/// Single SMS-property update emitted from live DBus property changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmsUpdate {
     IsReceived(bool),
-    Timestamp(Option<i64>),
+    Timestamp(Option<OffsetDateTime>),
     Number(Option<String>),
     Text(Option<String>),
 }
@@ -187,7 +183,7 @@ impl SmsUpdate {
     pub fn summary(&self) -> String {
         match self {
             SmsUpdate::IsReceived(value) => format!("is_received={value}"),
-            SmsUpdate::Timestamp(value) => format!("timestamp={}", format_option_i64(*value)),
+            SmsUpdate::Timestamp(value) => format!("timestamp={}", format_option_timestamp(*value)),
             SmsUpdate::Number(value) => {
                 format!("sender={}", format_option_string(value.as_deref()))
             }
@@ -206,9 +202,9 @@ fn format_option_u32(value: Option<u32>) -> String {
         .unwrap_or_else(|| "None".to_string())
 }
 
-fn format_option_i64(value: Option<i64>) -> String {
+fn format_option_timestamp(value: Option<OffsetDateTime>) -> String {
     value
-        .map(|value| value.to_string())
+        .map(|value| value.unix_timestamp().to_string())
         .unwrap_or_else(|| "None".to_string())
 }
 
@@ -346,20 +342,17 @@ pub fn sms_is_received(state: u32) -> bool {
     state == 3
 }
 
-pub fn parse_sms_timestamp_to_unix(timestamp: &str) -> Option<i64> {
+pub fn parse_sms_timestamp(timestamp: &str) -> Option<OffsetDateTime> {
     let trimmed = timestamp.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    OffsetDateTime::parse(trimmed, &Iso8601::DEFAULT)
-        .ok()
-        .map(|value| value.unix_timestamp())
+    OffsetDateTime::parse(trimmed, &Iso8601::DEFAULT).ok()
 }
 
-pub fn format_unix_timestamp_for_wb(timestamp: i64) -> Option<String> {
-    let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
-    Some(format!(
+pub fn format_timestamp_for_wb(value: OffsetDateTime) -> String {
+    format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         value.year(),
         value.month() as u8,
@@ -367,5 +360,5 @@ pub fn format_unix_timestamp_for_wb(timestamp: i64) -> Option<String> {
         value.hour(),
         value.minute(),
         value.second(),
-    ))
+    )
 }

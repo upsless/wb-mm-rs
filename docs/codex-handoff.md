@@ -43,9 +43,10 @@ Planned async components:
 - Treat `wirenboard/conventions` README as the source of truth for MQTT
   device/control shape, metadata, control types, and compatibility details.
 - Preserve old `wb-mm-mqtt` Last Will semantics: if the daemon dies,
-  ModemManager must become unavailable in the UI/control model. The
-  availability control is a daemon capability marker, not only a cached DBus
-  value.
+  ModemManager must become unavailable in the UI/control model. The public
+  MQTT `is_available` control is the single user-facing trust marker: it must
+  become `0` both when the daemon dies unexpectedly and when the internal
+  three-state DBus status says ModemManager data is not trustworthy.
 - Consider combining UI-visible availability with conventional
   `/devices/<device>/meta/error` reporting, but do not lose the Last Will
   behavior.
@@ -110,6 +111,10 @@ Planned async components:
   - it clears those retained topics on normal shutdown;
   - it sets Last Will on the ModemManager availability control so unexpected
     daemon death still makes the service unavailable in UI/control terms.
+- Internally the daemon still keeps `ModemManagerStatus =
+  Active | Inactive | NotFound`, but that three-state value is now private to
+  the logic layer. The public MQTT device exposes only one trust switch:
+  `is_available` (`1` when ModemManager data is trustworthy, `0` otherwise).
 - The current stage-0.2 manager-level DBus events are intentionally compact:
   `StatusChanged`, `Snapshot { version, modem_count }`, and
   `ModemCountChanged`.
@@ -123,15 +128,19 @@ Planned async components:
     sorting by the resulting numeric short ids;
   - MQTT-side human selection numbering still starts from `1`, but tresher
     maps that back to the ordered DBus short-id list;
-  - manager MQTT device publishes `sms_count` and `last_sms`;
+  - manager MQTT device publishes `sms_count`, visible `last_sms`, and hidden
+    `last_sms_unixtime`;
   - each modem device publishes `sms_count`, writable `message_select`, and
-    selected-SMS fields (`selected_sms_timestamp`, `selected_sms_sender`,
-    `selected_sms_text`, `selected_sms_is_received`);
-  - SMS timestamps are normalized to unix time before MQTT publish;
+    visible/hidden last-SMS timestamp controls plus selected-SMS fields
+    (`selected_sms_timestamp`, hidden `selected_sms_timestamp_unixtime`,
+    `selected_sms_sender`, `selected_sms_text`, `selected_sms_is_received`);
+  - DBus and dispatcher pass SMS timestamps as `OffsetDateTime`; MQTT formats
+    visible text controls and publishes paired hidden `meta/type=unixtime`
+    controls with integer unix time payloads;
   - user writes to `message_select/on` are routed through
     `MQTT -> Tresher -> DBUS -> Tresher -> MQTT`.
 - Live verification on `wb.loc` confirmed:
-  - manager topics publish `sms_count` and `last_sms` with `meta/type=unixtime`;
+  - manager topics publish `sms_count` and `last_sms`;
   - modem topics publish SMS count and selected-SMS fields;
   - after the short-id rewrite, the initial selected SMS is the first element
     of the ordered `Messages` list (`message_select=1`);
@@ -151,12 +160,9 @@ Planned async components:
 - Current log formatting uses explicit component targets, mirroring the python
   project's style more closely:
   `MAIN`, `DBUS`, `MQTT`, and `DISP`.
-- SMS timestamp controls should use WB's dedicated unix-time control type:
-  `meta/type=unixtime`, payload = integer unix time.
-  Update: current WB UI on the test board does not render that as a human
-  date for our custom controls, so SMS timestamps are temporarily published in
-  the same practical shape as `/devices/system/controls/Manufacturing Date`:
-  `meta/type=text`, payload like `YYYY-MM-DD HH:MM:SS`.
+- SMS timestamp controls are published in pairs: visible text controls with
+  payload like `YYYY-MM-DD HH:MM:SS`, and hidden read-only `unixtime` controls
+  with integer unix time payloads for machine consumers.
 
 ## Known Reference Findings
 

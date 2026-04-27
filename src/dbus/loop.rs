@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -20,11 +21,7 @@ use crate::exchange::{DbusCommand, DbusEvent};
 
 const LOG_TARGET: &str = "DBUS";
 
-/// Active-only ModemManager watchers.
-///
-/// We rebuild this bundle every time the ModemManager DBus name becomes active.
-/// That keeps the streams tied to the current service owner instead of trying
-/// to carry subscriptions across service restarts.
+/// Streams and per-modem tasks that exist only while ModemManager is active.
 struct ActiveModemManagerState {
     snapshot: logics::ModemManagerSnapshot,
     version_changes: PropertyStream<'static, String>,
@@ -34,11 +31,8 @@ struct ActiveModemManagerState {
     modem_tasks: HashMap<logics::ModemId, JoinHandle<()>>,
 }
 
-/// Owns the DBus-side lifecycle:
-/// - connect to the bus;
-/// - inspect the current ModemManager state;
-/// - subscribe to owner, property, and object changes;
-/// - stay alive until shutdown is requested.
+/// Connects to DBus, publishes the initial ModemManager state, and forwards
+/// ModemManager changes until shutdown or connection loss.
 pub async fn run(
     dbus_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -346,8 +340,7 @@ pub async fn run(
     Ok(())
 }
 
-/// Build a DBus connection either to the system bus or to a custom address
-/// such as the remote `unixexec:` bridge we use during development.
+/// Opens the system bus or the custom DBus address passed by the CLI.
 async fn connect(dbus_address: Option<&str>) -> Result<Connection> {
     match dbus_address {
         Some(address) => Builder::address(address)
@@ -361,14 +354,8 @@ async fn connect(dbus_address: Option<&str>) -> Result<Connection> {
     }
 }
 
-/// Collapse raw DBus facts into the three states we care about at stage 0.
-///
-/// `Active`:
-///   the well-known ModemManager bus name currently has an owner.
-/// `Inactive`:
-///   no owner yet, but the bus knows how to activate the service.
-/// `NotFound`:
-///   the name is neither owned nor activatable on this bus.
+/// Reads the ModemManager well-known name and activation metadata and returns
+/// the daemon's three-state availability model.
 async fn query_modemmanager_status(
     dbus_proxy: &DBusProxy<'_>,
 ) -> Result<logics::ModemManagerStatus> {
@@ -398,11 +385,8 @@ async fn query_modemmanager_status(
     }
 }
 
-/// Build the active-only state when ModemManager has an owner.
-///
-/// We subscribe to `ObjectManager` signals first and only then ask for the
-/// current object set. That mirrors the intended python-style flow: first arm
-/// change detection, then take the initial count snapshot.
+/// Creates manager-level proxies and starts per-modem watchers for the current
+/// ModemManager service owner.
 async fn activate_modemmanager_state(
     connection: &Connection,
     event_tx: &mpsc::Sender<DbusEvent>,
@@ -456,11 +440,7 @@ async fn activate_modemmanager_state(
     })
 }
 
-/// Read only modem objects from the ObjectManager tree.
-///
-/// This is the Rust equivalent of the old python project keeping an explicit
-/// modem list off the ModemManager service rather than treating every managed
-/// object as countable state.
+/// Counts objects that implement the ModemManager Modem interface.
 async fn query_modem_count(object_manager: &ObjectManagerProxy<'_>) -> Result<usize> {
     let managed_objects = object_manager
         .get_managed_objects()
@@ -668,8 +648,36 @@ async fn run_modem_task(
         .receive_property_changed::<Vec<OwnedObjectPath>>("Messages")
         .await;
 
-    let mut snapshot = query_modem_snapshot(&connection, &modem_proxy).await?;
     let initial_sms_ids = query_modem_sms_ids(&messaging_proxy).await?;
+    let initial_last_sms_timestamp =
+        query_last_sms_timestamp(&connection, &initial_sms_ids).await?;
+    let mut snapshot = query_modem_snapshot(
+        &connection,
+        &modem_proxy,
+        initial_sms_ids.len(),
+        initial_last_sms_timestamp,
+    )
+    .await?;
+
+    info!(target: LOG_TARGET, "{}", logics::modem_found_message(&modem_id));
+    emit_event(
+        &event_tx,
+        DbusEvent::ModemFound {
+            modem_id: modem_id.clone(),
+        },
+    )
+    .await;
+
+    info!(target: LOG_TARGET, "{}", logics::modem_snapshot_message(&modem_id, &snapshot));
+    emit_event(
+        &event_tx,
+        DbusEvent::ModemSnapshot {
+            modem_id: modem_id.clone(),
+            snapshot: snapshot.clone(),
+        },
+    )
+    .await;
+
     emit_event(
         &event_tx,
         DbusEvent::SmsListChanged {
@@ -693,25 +701,6 @@ async fn run_modem_task(
     }
     let mut sms_tasks =
         spawn_initial_sms_tasks(&connection, &modem_id, initial_sms_ids, &event_tx).await?;
-
-    info!(target: LOG_TARGET, "{}", logics::modem_found_message(&modem_id));
-    emit_event(
-        &event_tx,
-        DbusEvent::ModemFound {
-            modem_id: modem_id.clone(),
-        },
-    )
-    .await;
-
-    info!(target: LOG_TARGET, "{}", logics::modem_snapshot_message(&modem_id, &snapshot));
-    emit_event(
-        &event_tx,
-        DbusEvent::ModemSnapshot {
-            modem_id: modem_id.clone(),
-            snapshot: snapshot.clone(),
-        },
-    )
-    .await;
 
     loop {
         tokio::select! {
@@ -1015,7 +1004,7 @@ async fn run_sms_task(
                     debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
-                let timestamp = logics::parse_sms_timestamp_to_unix(
+                let timestamp = logics::parse_sms_timestamp(
                     &change
                         .get()
                         .await
@@ -1130,6 +1119,8 @@ fn sms_ids_from_paths(message_paths: &[OwnedObjectPath]) -> Vec<logics::SmsId> {
 async fn query_modem_snapshot(
     connection: &Connection,
     modem_proxy: &Proxy<'_>,
+    sms_count: usize,
+    last_sms_timestamp: Option<OffsetDateTime>,
 ) -> Result<logics::ModemSnapshot> {
     let model: String = modem_proxy
         .get_property("Model")
@@ -1164,7 +1155,53 @@ async fn query_modem_snapshot(
         primary_sim_slot: Some(primary_sim_slot),
         operator_name: query_operator_name(connection, sim_path).await?,
         signal_quality: Some(signal_quality.0),
+        sms_count,
+        last_sms_timestamp,
     })
+}
+
+async fn query_last_sms_timestamp(
+    connection: &Connection,
+    sms_ids: &[logics::SmsId],
+) -> Result<Option<OffsetDateTime>> {
+    let Some(last_sms_id) = sms_ids.last() else {
+        return Ok(None);
+    };
+
+    query_sms_timestamp(connection, last_sms_id).await
+}
+
+async fn query_sms_timestamp(
+    connection: &Connection,
+    sms_id: &logics::SmsId,
+) -> Result<Option<OffsetDateTime>> {
+    let sms_path = logics::sms_path_from_id(sms_id);
+    let sms_proxy: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set SMS proxy destination")?
+        .path(sms_path.as_str())
+        .context("failed to set SMS proxy path")?
+        .interface(logics::MM_SMS_INTERFACE)
+        .context("failed to set SMS proxy interface")?
+        .cache_properties(CacheProperties::Yes)
+        .build()
+        .await
+        .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
+
+    let pdu_type: u32 = sms_proxy
+        .get_property("PduType")
+        .await
+        .context("failed to read SMS PduType property")?;
+    if !logics::is_incoming_sms_pdu(pdu_type) {
+        return Ok(None);
+    }
+
+    let timestamp: String = sms_proxy
+        .get_property("Timestamp")
+        .await
+        .context("failed to read SMS Timestamp property")?;
+
+    Ok(logics::parse_sms_timestamp(&timestamp))
 }
 
 async fn query_sms_snapshot(
@@ -1211,7 +1248,7 @@ async fn query_sms_snapshot(
 
     Ok(Some(logics::SmsSnapshot {
         is_received: logics::sms_is_received(state),
-        timestamp: logics::parse_sms_timestamp_to_unix(&timestamp),
+        timestamp: logics::parse_sms_timestamp(&timestamp),
         number: normalize_string(number),
         text: normalize_string(text),
     }))

@@ -9,7 +9,7 @@ use crate::exchange::{DbusCommand, DbusEvent};
 
 pub use logics::{
     ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
-    format_unix_timestamp_for_wb,
+    format_timestamp_for_wb,
 };
 
 pub async fn run(

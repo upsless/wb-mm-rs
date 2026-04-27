@@ -82,10 +82,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Supervises subsystem sessions according to the daemon lifecycle rules:
-/// - MQTT is the top-level gate;
-/// - DBus only runs while MQTT is alive;
-/// - each subsystem reconnects with its own retry cadence.
+/// Starts MQTT, dispatcher, and DBus sessions and restarts them according to
+/// the configured reconnect intervals.
 async fn run_supervisor(
     dbus_address: Option<String>,
     mqtt_address: Option<String>,
@@ -157,11 +155,7 @@ async fn run_supervisor(
     }
 }
 
-/// Runs DBus sessions only while the current MQTT session is alive.
-///
-/// When DBus drops, we mark ModemManager as not found and retry only DBus.
-/// When MQTT drops, we stop DBus and hand control back to the outer loop so
-/// MQTT can reconnect first and DBus can then restart from a clean slate.
+/// Runs and reconnects DBus while the current MQTT session is alive.
 async fn run_dbus_lifecycle(
     dbus_address: Option<String>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -248,11 +242,8 @@ async fn run_dbus_lifecycle(
     }
 }
 
-/// Turn a `JoinHandle<Result<...>>` into a plain `Result`.
-///
-/// Tokio separates:
-/// - task execution failure (`JoinError`): task panicked or was aborted;
-/// - business failure (`Result<()>`): task finished but returned an error.
+/// Converts a task result into an `anyhow::Result` with the task name in the
+/// error context.
 fn task_result(
     name: &str,
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
@@ -262,9 +253,8 @@ fn task_result(
         .with_context(|| format!("{name} task failed"))
 }
 
-/// For reconnectable child sessions we treat inner `Result` errors as normal
-/// lifecycle failures and retry them. A Tokio join failure still means
-/// something is wrong in the runtime/task itself, so we keep that fatal.
+/// Logs an early child-task exit and returns an error only for Tokio join
+/// failures.
 fn log_unexpected_task_exit(
     name: &str,
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
@@ -346,10 +336,16 @@ enum SupervisorExit {
     MqttEnded,
 }
 
-/// Keep logging setup in one place so the rest of the daemon can just use
-/// `debug!/info!/error!` without worrying about subscribers and filters.
+/// Initializes tracing from `RUST_LOG` and suppresses noisy rumqttc state logs
+/// unless that target is explicitly requested.
 fn init_logging() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    let filter = if filter.contains("rumqttc::state") {
+        filter
+    } else {
+        format!("{filter},rumqttc::state=warn")
+    };
+    let filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

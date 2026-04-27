@@ -1,13 +1,15 @@
+use time::OffsetDateTime;
+
 pub const MQTT_DRIVER_NAME: &str = "wb-mm-mqtt";
 pub const MM_DEVICE_NAME: &str = "modemmanager";
 pub const MM_MODEM_DEVICE_PREFIX: &str = "mm_modem_";
 
 pub const MM_CONTROL_IS_AVAILABLE: &str = "is_available";
-pub const MM_CONTROL_STATUS: &str = "status";
 pub const MM_CONTROL_VERSION: &str = "version";
 pub const MM_CONTROL_MODEM_COUNT: &str = "modem_count";
 pub const MM_CONTROL_SMS_COUNT: &str = "sms_count";
 pub const MM_CONTROL_LAST_SMS: &str = "last_sms";
+pub const MM_CONTROL_LAST_SMS_UNIXTIME: &str = "last_sms_unixtime";
 
 pub const MODEM_CONTROL_IS_ACTIVE: &str = "is_active";
 pub const MODEM_CONTROL_MODEL: &str = "model";
@@ -17,8 +19,11 @@ pub const MODEM_CONTROL_PRIMARY_SIM_SLOT: &str = "primary_sim_slot";
 pub const MODEM_CONTROL_OPERATOR_NAME: &str = "operator_name";
 pub const MODEM_CONTROL_SIGNAL_QUALITY: &str = "signal_quality";
 pub const MODEM_CONTROL_SMS_COUNT: &str = "sms_count";
+pub const MODEM_CONTROL_LAST_SMS: &str = "last_sms";
+pub const MODEM_CONTROL_LAST_SMS_UNIXTIME: &str = "last_sms_unixtime";
 pub const MODEM_CONTROL_MESSAGE_SELECT: &str = "message_select";
 pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP: &str = "selected_sms_timestamp";
+pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME: &str = "selected_sms_timestamp_unixtime";
 pub const MODEM_CONTROL_SELECTED_SMS_SENDER: &str = "selected_sms_sender";
 pub const MODEM_CONTROL_SELECTED_SMS_TEXT: &str = "selected_sms_text";
 pub const MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED: &str = "selected_sms_is_received";
@@ -49,21 +54,10 @@ const MM_CONTROL_SPECS: [ControlSpec; 6] = [
         max: None,
     },
     ControlSpec {
-        name: MM_CONTROL_STATUS,
-        title_en: "Status",
-        title_ru: "Статус",
-        order: 1,
-        control_type: "text",
-        readonly: true,
-        units: None,
-        min: None,
-        max: None,
-    },
-    ControlSpec {
         name: MM_CONTROL_VERSION,
         title_en: "Version",
         title_ru: "Версия",
-        order: 2,
+        order: 1,
         control_type: "text",
         readonly: true,
         units: None,
@@ -74,7 +68,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 6] = [
         name: MM_CONTROL_MODEM_COUNT,
         title_en: "Modems count",
         title_ru: "Количество модемов",
-        order: 3,
+        order: 2,
         control_type: "value",
         readonly: true,
         units: None,
@@ -85,7 +79,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 6] = [
         name: MM_CONTROL_SMS_COUNT,
         title_en: "SMS count",
         title_ru: "Количество СМС",
-        order: 4,
+        order: 3,
         control_type: "value",
         readonly: true,
         units: None,
@@ -96,8 +90,19 @@ const MM_CONTROL_SPECS: [ControlSpec; 6] = [
         name: MM_CONTROL_LAST_SMS,
         title_en: "Last SMS",
         title_ru: "Последняя СМС",
-        order: 5,
+        order: 4,
         control_type: "text",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MM_CONTROL_LAST_SMS_UNIXTIME,
+        title_en: "Last SMS unix time",
+        title_ru: "Последняя СМС unix time",
+        order: 5,
+        control_type: "unixtime",
         readonly: true,
         units: None,
         min: None,
@@ -105,7 +110,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 6] = [
     },
 ];
 
-const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
+const MODEM_CONTROL_SPECS: [ControlSpec; 16] = [
     ControlSpec {
         name: MODEM_CONTROL_IS_ACTIVE,
         title_en: "Active",
@@ -195,10 +200,32 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
         max: None,
     },
     ControlSpec {
+        name: MODEM_CONTROL_LAST_SMS,
+        title_en: "Last SMS",
+        title_ru: "Последняя СМС",
+        order: 18,
+        control_type: "text",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SMS_UNIXTIME,
+        title_en: "Last SMS unix time",
+        title_ru: "Последняя СМС unix time",
+        order: 19,
+        control_type: "unixtime",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
         name: MODEM_CONTROL_MESSAGE_SELECT,
         title_en: "Selected SMS",
         title_ru: "Выбранная СМС",
-        order: 18,
+        order: 20,
         control_type: "range",
         readonly: true,
         units: None,
@@ -209,8 +236,19 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
         name: MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
         title_en: "SMS timestamp",
         title_ru: "Дата получения СМС",
-        order: 19,
+        order: 21,
         control_type: "text",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME,
+        title_en: "SMS timestamp unix time",
+        title_ru: "Дата получения СМС unix time",
+        order: 22,
+        control_type: "unixtime",
         readonly: true,
         units: None,
         min: None,
@@ -220,7 +258,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
         name: MODEM_CONTROL_SELECTED_SMS_SENDER,
         title_en: "SMS sender",
         title_ru: "Отправитель СМС",
-        order: 20,
+        order: 23,
         control_type: "text",
         readonly: true,
         units: None,
@@ -231,7 +269,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
         name: MODEM_CONTROL_SELECTED_SMS_TEXT,
         title_en: "SMS text",
         title_ru: "Текст СМС",
-        order: 21,
+        order: 24,
         control_type: "text",
         readonly: true,
         units: None,
@@ -242,7 +280,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
         name: MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
         title_en: "SMS received fully",
         title_ru: "СМС получена полностью",
-        order: 22,
+        order: 25,
         control_type: "switch",
         readonly: true,
         units: None,
@@ -260,10 +298,15 @@ pub fn modem_control_specs() -> &'static [ControlSpec] {
 }
 
 pub fn dynamic_message_select_spec(readonly: bool, max: u32) -> ControlSpec {
+    let base = MODEM_CONTROL_SPECS
+        .iter()
+        .find(|spec| spec.name == MODEM_CONTROL_MESSAGE_SELECT)
+        .expect("message_select control spec exists");
+
     ControlSpec {
         readonly,
         max: Some(max.max(1)),
-        ..MODEM_CONTROL_SPECS[8]
+        ..*base
     }
 }
 
@@ -279,8 +322,8 @@ pub fn mqtt_ensure_mm_device_message() -> &'static str {
     "Ensure ModemManager device"
 }
 
-pub fn mqtt_publish_mm_status_message(status: &str) -> String {
-    format!("Publish ModemManager status={status}")
+pub fn mqtt_publish_mm_availability_message(is_available: &str) -> String {
+    format!("Publish ModemManager is_available={is_available}")
 }
 
 pub fn mqtt_publish_mm_version_message(version: &str) -> String {
@@ -295,9 +338,12 @@ pub fn mqtt_publish_mm_sms_count_message(sms_count: usize) -> String {
     format!("Publish ModemManager sms_count={sms_count}")
 }
 
-pub fn mqtt_publish_mm_last_sms_message(last_sms: Option<i64>) -> String {
+pub fn mqtt_publish_mm_last_sms_message(last_sms: Option<OffsetDateTime>) -> String {
     match last_sms {
-        Some(last_sms) => format!("Publish ModemManager last_sms={last_sms}"),
+        Some(last_sms) => format!(
+            "Publish ModemManager last_sms={}",
+            last_sms.unix_timestamp()
+        ),
         None => "Publish ModemManager last_sms=None".to_string(),
     }
 }
@@ -412,6 +458,10 @@ pub fn control_meta_payload(spec: &ControlSpec) -> String {
         fields.push(format!(r#""max":{max}"#));
     }
 
+    if is_hidden_control(spec.name) {
+        fields.push(r#""hidden":true"#.to_string());
+    }
+
     format!("{{{}}}", fields.join(","))
 }
 
@@ -434,7 +484,18 @@ pub fn control_meta_leaf_payloads(spec: &ControlSpec) -> Vec<(&'static str, Stri
         fields.push(("max", max.to_string()));
     }
 
+    if is_hidden_control(spec.name) {
+        fields.push(("hidden", bool_payload(true).to_string()));
+    }
+
     fields
+}
+
+fn is_hidden_control(control_name: &str) -> bool {
+    matches!(
+        control_name,
+        MM_CONTROL_LAST_SMS_UNIXTIME | MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME
+    )
 }
 
 pub fn device_meta_topic(device_name: &str) -> String {

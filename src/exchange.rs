@@ -1,13 +1,10 @@
+use time::OffsetDateTime;
+
 use crate::dbus::{
     ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
 };
 
-/// Stage-0.2 events emitted by the DBus side into the tresher.
-///
-/// The manager-level part stays intentionally small, following the old python
-/// project where ModemManager itself had only a few event shapes and most of
-/// the detail lived in the payload. The modem-level part mirrors that idea but
-/// uses typed Rust structs instead of a kwargs bag.
+/// Events emitted by the DBus loop and consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbusEvent {
     StatusChanged(ModemManagerStatus),
@@ -57,11 +54,7 @@ pub enum DbusEvent {
     },
 }
 
-/// Commands produced by the tresher and consumed by the MQTT side.
-///
-/// The MQTT frontend now executes these commands against a real broker, but
-/// the command set is still intentionally compact: only the currently modeled
-/// ModemManager and per-modem controls are covered.
+/// Commands emitted by the dispatcher and executed by the MQTT loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttCommand {
     EnsureModemManagerDevice,
@@ -69,7 +62,7 @@ pub enum MqttCommand {
     PublishModemManagerVersion(String),
     PublishModemManagerModemCount(usize),
     PublishModemManagerSmsCount(usize),
-    PublishModemManagerLastSms(Option<i64>),
+    PublishModemManagerLastSms(Option<OffsetDateTime>),
     EnsureModemDevice {
         modem_id: ModemId,
     },
@@ -84,6 +77,10 @@ pub enum MqttCommand {
     PublishModemSmsCount {
         modem_id: ModemId,
         sms_count: usize,
+    },
+    PublishModemLastSms {
+        modem_id: ModemId,
+        last_sms_timestamp: Option<OffsetDateTime>,
     },
     PublishModemSmsSelection {
         modem_id: ModemId,
@@ -100,8 +97,7 @@ pub enum MqttCommand {
     },
 }
 
-/// MQTT-originated events that need business-logic decisions before touching
-/// DBus.
+/// MQTT writes that need dispatcher validation before DBus calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttEvent {
     SelectModemSms {
@@ -110,7 +106,7 @@ pub enum MqttEvent {
     },
 }
 
-/// DBus-side actions requested by business logic.
+/// Commands emitted by the dispatcher and executed by the DBus loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbusCommand {
     RefreshSelectedSms { modem_id: ModemId, sms_id: SmsId },

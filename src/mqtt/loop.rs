@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, Publish, QoS, Transport};
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -107,14 +108,16 @@ impl MqttFrontend {
                 self.ensure_manager_device().await?;
                 self.publish_text_control(
                     logics::MM_DEVICE_NAME,
-                    logics::MM_CONTROL_STATUS,
-                    modemmanager_status_name(status),
+                    logics::MM_CONTROL_IS_AVAILABLE,
+                    switch_payload(modemmanager_is_available(status)),
                 )
                 .await?;
                 info!(
                     target: LOG_TARGET,
                     "{}",
-                    logics::mqtt_publish_mm_status_message(modemmanager_status_name(status))
+                    logics::mqtt_publish_mm_availability_message(switch_payload(
+                        modemmanager_is_available(status)
+                    ))
                 );
             }
             MqttCommand::PublishModemManagerVersion(version) => {
@@ -157,9 +160,10 @@ impl MqttFrontend {
             }
             MqttCommand::PublishModemManagerLastSms(last_sms) => {
                 self.ensure_manager_device().await?;
-                self.publish_optional_timestamp_text_control(
+                self.publish_optional_timestamp_controls(
                     logics::MM_DEVICE_NAME,
                     logics::MM_CONTROL_LAST_SMS,
+                    logics::MM_CONTROL_LAST_SMS_UNIXTIME,
                     last_sms,
                 )
                 .await?;
@@ -220,6 +224,20 @@ impl MqttFrontend {
                     "{}",
                     logics::mqtt_publish_modem_sms_count_message(modem_index, &modem_id.0, sms_count)
                 );
+            }
+            MqttCommand::PublishModemLastSms {
+                modem_id,
+                last_sms_timestamp,
+            } => {
+                let modem_index = self.ensure_modem_device(&modem_id).await?;
+                let device_name = logics::device_name_for_modem(modem_index);
+                self.publish_optional_timestamp_controls(
+                    &device_name,
+                    logics::MODEM_CONTROL_LAST_SMS,
+                    logics::MODEM_CONTROL_LAST_SMS_UNIXTIME,
+                    last_sms_timestamp,
+                )
+                .await?;
             }
             MqttCommand::PublishModemSmsSelection {
                 modem_id,
@@ -333,9 +351,7 @@ impl MqttFrontend {
                 .await?;
         }
 
-        self.publish_text_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_IS_AVAILABLE, "1")
-            .await?;
-        self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_STATUS)
+        self.publish_text_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_IS_AVAILABLE, "0")
             .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_VERSION)
             .await?;
@@ -344,6 +360,8 @@ impl MqttFrontend {
         self.publish_number_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_SMS_COUNT, 0)
             .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_LAST_SMS)
+            .await?;
+        self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_LAST_SMS_UNIXTIME)
             .await?;
 
         self.state.manager_device_created = true;
@@ -383,6 +401,10 @@ impl MqttFrontend {
         self.publish_null_control(&device_name, logics::MODEM_CONTROL_SIGNAL_QUALITY)
             .await?;
         self.publish_number_control(&device_name, logics::MODEM_CONTROL_SMS_COUNT, 0)
+            .await?;
+        self.publish_null_control(&device_name, logics::MODEM_CONTROL_LAST_SMS)
+            .await?;
+        self.publish_null_control(&device_name, logics::MODEM_CONTROL_LAST_SMS_UNIXTIME)
             .await?;
         self.publish_modem_sms_selection(modem_index, None, 1, false)
             .await?;
@@ -451,6 +473,19 @@ impl MqttFrontend {
             &device_name,
             logics::MODEM_CONTROL_SIGNAL_QUALITY,
             snapshot.signal_quality,
+        )
+        .await?;
+        self.publish_number_control(
+            &device_name,
+            logics::MODEM_CONTROL_SMS_COUNT,
+            snapshot.sms_count,
+        )
+        .await?;
+        self.publish_optional_timestamp_controls(
+            &device_name,
+            logics::MODEM_CONTROL_LAST_SMS,
+            logics::MODEM_CONTROL_LAST_SMS_UNIXTIME,
+            snapshot.last_sms_timestamp,
         )
         .await?;
 
@@ -544,9 +579,10 @@ impl MqttFrontend {
 
         match snapshot {
             Some(snapshot) => {
-                self.publish_optional_timestamp_text_control(
+                self.publish_optional_timestamp_controls(
                     &device_name,
                     logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
+                    logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME,
                     snapshot.timestamp,
                 )
                 .await?;
@@ -573,6 +609,11 @@ impl MqttFrontend {
                 self.publish_null_control(
                     &device_name,
                     logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
+                )
+                .await?;
+                self.publish_null_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME,
                 )
                 .await?;
                 self.publish_null_control(&device_name, logics::MODEM_CONTROL_SELECTED_SMS_SENDER)
@@ -624,7 +665,7 @@ impl MqttFrontend {
 
     async fn cleanup_device(&self, device_name: &str, control_specs: &[ControlSpec]) -> Result<()> {
         for spec in control_specs {
-            self.unpublish_control(device_name, spec.name).await?;
+            self.cleanup_control(device_name, spec).await?;
         }
 
         self.unpublish_retained(logics::device_meta_topic(device_name))
@@ -681,18 +722,34 @@ impl MqttFrontend {
         .await
     }
 
-    async fn publish_optional_timestamp_text_control(
+    async fn publish_optional_timestamp_controls(
         &self,
         device_name: &str,
-        control_name: &str,
-        value: Option<i64>,
+        text_control_name: &str,
+        unixtime_control_name: &str,
+        value: Option<OffsetDateTime>,
     ) -> Result<()> {
-        match value.and_then(dbus::format_unix_timestamp_for_wb) {
+        match value {
             Some(value) => {
-                self.publish_text_control(device_name, control_name, &value)
+                self.publish_text_control(
+                    device_name,
+                    text_control_name,
+                    &dbus::format_timestamp_for_wb(value),
+                )
+                .await?;
+                self.publish_number_control(
+                    device_name,
+                    unixtime_control_name,
+                    value.unix_timestamp(),
+                )
+                .await
+            }
+            None => {
+                self.publish_null_control(device_name, text_control_name)
+                    .await?;
+                self.publish_null_control(device_name, unixtime_control_name)
                     .await
             }
-            None => self.publish_null_control(device_name, control_name).await,
         }
     }
 
@@ -726,24 +783,22 @@ impl MqttFrontend {
         }
     }
 
-    async fn unpublish_control(&self, device_name: &str, control_name: &str) -> Result<()> {
-        self.unpublish_retained(logics::control_meta_topic(device_name, control_name))
+    async fn cleanup_control(&self, device_name: &str, spec: &ControlSpec) -> Result<()> {
+        self.unpublish_retained(logics::control_meta_topic(device_name, spec.name))
             .await?;
 
-        for (field, _) in logics::control_meta_leaf_payloads(
-            control_spec_by_name(control_name).expect("unknown control spec"),
-        ) {
+        for (field, _) in logics::control_meta_leaf_payloads(spec) {
             self.unpublish_retained(logics::control_meta_leaf_topic(
                 device_name,
-                control_name,
+                spec.name,
                 field,
             ))
             .await?;
         }
 
-        self.unpublish_retained(logics::control_on_topic(device_name, control_name))
+        self.unpublish_retained(logics::control_on_topic(device_name, spec.name))
             .await?;
-        self.unpublish_retained(logics::control_value_topic(device_name, control_name))
+        self.unpublish_retained(logics::control_value_topic(device_name, spec.name))
             .await?;
 
         Ok(())
@@ -821,9 +876,11 @@ fn build_mqtt_options(mqtt_address: Option<&str>) -> Result<MqttOptions> {
     };
 
     mqtt_options.set_keep_alive(MQTT_KEEP_ALIVE);
+    // If the daemon dies unexpectedly, the only user-facing trust marker must
+    // flip to unavailable without waiting for any explicit cleanup path.
     mqtt_options.set_last_will(LastWill::new(
         logics::mm_availability_topic(),
-        Vec::<u8>::new(),
+        switch_payload(false),
         QoS::AtMostOnce,
         true,
     ));
@@ -916,13 +973,6 @@ fn parse_mqtt_endpoint(mqtt_address: &str) -> Result<MqttEndpoint> {
     }
 }
 
-fn control_spec_by_name(control_name: &str) -> Option<&'static ControlSpec> {
-    logics::manager_control_specs()
-        .iter()
-        .chain(logics::modem_control_specs().iter())
-        .find(|spec| spec.name == control_name)
-}
-
 fn parse_message_select_topic(topic: &str) -> Option<u32> {
     let prefix = format!("/devices/{}", logics::MM_MODEM_DEVICE_PREFIX);
     let suffix = format!("/controls/{}/on", logics::MODEM_CONTROL_MESSAGE_SELECT);
@@ -930,12 +980,8 @@ fn parse_message_select_topic(topic: &str) -> Option<u32> {
     modem_index.parse::<u32>().ok()
 }
 
-fn modemmanager_status_name(status: ModemManagerStatus) -> &'static str {
-    match status {
-        ModemManagerStatus::Active => "active",
-        ModemManagerStatus::Inactive => "inactive",
-        ModemManagerStatus::NotFound => "not_found",
-    }
+fn modemmanager_is_available(status: ModemManagerStatus) -> bool {
+    matches!(status, ModemManagerStatus::Active)
 }
 
 fn switch_payload(value: bool) -> &'static str {

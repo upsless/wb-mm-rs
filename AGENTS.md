@@ -29,8 +29,9 @@ ModemManager integration.
   context.
 - Preserve the old project's Last Will semantics: if the daemon disappears,
   ModemManager must be treated as unavailable for UI/control purposes. The
-  MQTT availability control is a daemon capability marker, not just a cached
-  DBus value.
+  public MQTT `is_available` control is the user-facing trust marker: it must
+  go to `0` both when DBus says ModemManager data is not trustworthy and when
+  the daemon disappears unexpectedly via Last Will.
 - For Rust code that uses async/Tokio or other non-obvious "Rusty"
   constructions, prefer adding concise rustdoc comments on public items and
   short inline comments around non-obvious control flow. Write them so a
