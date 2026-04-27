@@ -6,6 +6,8 @@ pub const MM_CONTROL_IS_AVAILABLE: &str = "is_available";
 pub const MM_CONTROL_STATUS: &str = "status";
 pub const MM_CONTROL_VERSION: &str = "version";
 pub const MM_CONTROL_MODEM_COUNT: &str = "modem_count";
+pub const MM_CONTROL_SMS_COUNT: &str = "sms_count";
+pub const MM_CONTROL_LAST_SMS: &str = "last_sms";
 
 pub const MODEM_CONTROL_IS_ACTIVE: &str = "is_active";
 pub const MODEM_CONTROL_MODEL: &str = "model";
@@ -14,6 +16,12 @@ pub const MODEM_CONTROL_STATE: &str = "state";
 pub const MODEM_CONTROL_PRIMARY_SIM_SLOT: &str = "primary_sim_slot";
 pub const MODEM_CONTROL_OPERATOR_NAME: &str = "operator_name";
 pub const MODEM_CONTROL_SIGNAL_QUALITY: &str = "signal_quality";
+pub const MODEM_CONTROL_SMS_COUNT: &str = "sms_count";
+pub const MODEM_CONTROL_MESSAGE_SELECT: &str = "message_select";
+pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP: &str = "selected_sms_timestamp";
+pub const MODEM_CONTROL_SELECTED_SMS_SENDER: &str = "selected_sms_sender";
+pub const MODEM_CONTROL_SELECTED_SMS_TEXT: &str = "selected_sms_text";
+pub const MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED: &str = "selected_sms_is_received";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlSpec {
@@ -28,7 +36,7 @@ pub struct ControlSpec {
     pub max: Option<u32>,
 }
 
-const MM_CONTROL_SPECS: [ControlSpec; 4] = [
+const MM_CONTROL_SPECS: [ControlSpec; 6] = [
     ControlSpec {
         name: MM_CONTROL_IS_AVAILABLE,
         title_en: "Available",
@@ -73,9 +81,31 @@ const MM_CONTROL_SPECS: [ControlSpec; 4] = [
         min: None,
         max: None,
     },
+    ControlSpec {
+        name: MM_CONTROL_SMS_COUNT,
+        title_en: "SMS count",
+        title_ru: "Количество СМС",
+        order: 4,
+        control_type: "value",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MM_CONTROL_LAST_SMS,
+        title_en: "Last SMS",
+        title_ru: "Последняя СМС",
+        order: 5,
+        control_type: "unixtime",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
 ];
 
-const MODEM_CONTROL_SPECS: [ControlSpec; 7] = [
+const MODEM_CONTROL_SPECS: [ControlSpec; 13] = [
     ControlSpec {
         name: MODEM_CONTROL_IS_ACTIVE,
         title_en: "Active",
@@ -153,6 +183,72 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 7] = [
         min: None,
         max: None,
     },
+    ControlSpec {
+        name: MODEM_CONTROL_SMS_COUNT,
+        title_en: "SMS count",
+        title_ru: "Количество СМС",
+        order: 17,
+        control_type: "value",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_MESSAGE_SELECT,
+        title_en: "Selected SMS",
+        title_ru: "Выбранная СМС",
+        order: 18,
+        control_type: "range",
+        readonly: true,
+        units: None,
+        min: Some(1),
+        max: Some(1),
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
+        title_en: "SMS timestamp",
+        title_ru: "Дата получения СМС",
+        order: 19,
+        control_type: "unixtime",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_SENDER,
+        title_en: "SMS sender",
+        title_ru: "Отправитель СМС",
+        order: 20,
+        control_type: "text",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_TEXT,
+        title_en: "SMS text",
+        title_ru: "Текст СМС",
+        order: 21,
+        control_type: "text",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
+        title_en: "SMS received fully",
+        title_ru: "СМС получена полностью",
+        order: 22,
+        control_type: "switch",
+        readonly: true,
+        units: None,
+        min: None,
+        max: None,
+    },
 ];
 
 pub fn manager_control_specs() -> &'static [ControlSpec] {
@@ -161,6 +257,14 @@ pub fn manager_control_specs() -> &'static [ControlSpec] {
 
 pub fn modem_control_specs() -> &'static [ControlSpec] {
     &MODEM_CONTROL_SPECS
+}
+
+pub fn dynamic_message_select_spec(readonly: bool, max: u32) -> ControlSpec {
+    ControlSpec {
+        readonly,
+        max: Some(max.max(1)),
+        ..MODEM_CONTROL_SPECS[8]
+    }
 }
 
 pub fn mqtt_connected_message() -> &'static str {
@@ -187,6 +291,17 @@ pub fn mqtt_publish_mm_modem_count_message(modem_count: usize) -> String {
     format!("Publish ModemManager modem_count={modem_count}")
 }
 
+pub fn mqtt_publish_mm_sms_count_message(sms_count: usize) -> String {
+    format!("Publish ModemManager sms_count={sms_count}")
+}
+
+pub fn mqtt_publish_mm_last_sms_message(last_sms: Option<i64>) -> String {
+    match last_sms {
+        Some(last_sms) => format!("Publish ModemManager last_sms={last_sms}"),
+        None => "Publish ModemManager last_sms=None".to_string(),
+    }
+}
+
 pub fn mqtt_ensure_modem_device_message(modem_index: u32, dbus_modem_id: &str) -> String {
     format!("Ensure modem device modem={modem_index} dbus_modem_id={dbus_modem_id}")
 }
@@ -205,6 +320,46 @@ pub fn mqtt_publish_modem_update_message(
     update: &str,
 ) -> String {
     format!("Publish modem update modem={modem_index} dbus_modem_id={dbus_modem_id} {update}")
+}
+
+pub fn mqtt_publish_modem_sms_count_message(
+    modem_index: u32,
+    dbus_modem_id: &str,
+    sms_count: usize,
+) -> String {
+    format!(
+        "Publish modem sms_count modem={modem_index} dbus_modem_id={dbus_modem_id} sms_count={sms_count}"
+    )
+}
+
+pub fn mqtt_publish_modem_sms_selection_message(
+    modem_index: u32,
+    dbus_modem_id: &str,
+    selected_index: Option<u32>,
+    max_index: u32,
+    writable: bool,
+) -> String {
+    format!(
+        "Publish modem message_select modem={modem_index} dbus_modem_id={dbus_modem_id} selected_index={} max_index={max_index} writable={writable}",
+        selected_index
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "None".to_string()),
+    )
+}
+
+pub fn mqtt_publish_selected_sms_message(
+    modem_index: u32,
+    dbus_modem_id: &str,
+    snapshot_summary: Option<&str>,
+) -> String {
+    match snapshot_summary {
+        Some(snapshot_summary) => format!(
+            "Publish selected SMS modem={modem_index} dbus_modem_id={dbus_modem_id} {snapshot_summary}"
+        ),
+        None => {
+            format!("Publish selected SMS modem={modem_index} dbus_modem_id={dbus_modem_id} None")
+        }
+    }
 }
 
 pub fn mqtt_delete_modem_device_message(modem_index: u32, dbus_modem_id: &str) -> String {

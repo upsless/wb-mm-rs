@@ -1,15 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
+use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, Publish, QoS, Transport};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
-use crate::dbus::{ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate};
-use crate::exchange::MqttCommand;
+use crate::dbus::{ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsSnapshot};
+use crate::exchange::{MqttCommand, MqttEvent};
 use crate::mqtt::logics::{self, ControlSpec};
 
 const LOG_TARGET: &str = "MQTT";
@@ -18,23 +18,27 @@ const DEFAULT_MQTT_PORT: u16 = 1883;
 const MQTT_CLIENT_ID_PREFIX: &str = "wb-mm-mqtt";
 const MQTT_KEEP_ALIVE: Duration = Duration::from_secs(60);
 const MQTT_REQUEST_QUEUE_CAPACITY: usize = 16;
+const MQTT_INCOMING_CHANNEL_CAPACITY: usize = 32;
 
-/// MQTT lifecycle loop with a real broker connection and real retained
-/// publishes.
-///
-/// The frontend still covers only the current stage-0.2 command set, but those
-/// commands now create WB devices/controls and update retained values on the
-/// broker instead of merely logging what would have happened.
+/// MQTT lifecycle loop with a real broker connection, retained publishes and
+/// incoming `/on` command handling.
 pub async fn run(
     mqtt_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut command_rx: mpsc::Receiver<MqttCommand>,
+    mqtt_event_tx: mpsc::Sender<MqttEvent>,
 ) -> Result<()> {
     let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
     let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
     let mut frontend = MqttFrontend::new(client.clone());
     let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
-    let mut eventloop_task = tokio::spawn(run_eventloop(eventloop_stop_rx, eventloop));
+    let (incoming_publish_tx, mut incoming_publish_rx) =
+        mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);
+    let mut eventloop_task = tokio::spawn(run_eventloop(
+        eventloop_stop_rx,
+        eventloop,
+        incoming_publish_tx,
+    ));
 
     loop {
         tokio::select! {
@@ -49,6 +53,14 @@ pub async fn run(
                     break;
                 };
                 frontend.handle_command(command).await?;
+            }
+            maybe_publish = incoming_publish_rx.recv() => {
+                let Some(publish) = maybe_publish else {
+                    return Ok(());
+                };
+                frontend
+                    .handle_incoming_publish(publish, &mqtt_event_tx)
+                    .await?;
             }
             result = &mut eventloop_task => {
                 return eventloop_result(result);
@@ -129,6 +141,34 @@ impl MqttFrontend {
                     logics::mqtt_publish_mm_modem_count_message(modem_count)
                 );
             }
+            MqttCommand::PublishModemManagerSmsCount(sms_count) => {
+                self.ensure_manager_device().await?;
+                self.publish_number_control(
+                    logics::MM_DEVICE_NAME,
+                    logics::MM_CONTROL_SMS_COUNT,
+                    sms_count,
+                )
+                .await?;
+                info!(
+                    target: LOG_TARGET,
+                    "{}",
+                    logics::mqtt_publish_mm_sms_count_message(sms_count)
+                );
+            }
+            MqttCommand::PublishModemManagerLastSms(last_sms) => {
+                self.ensure_manager_device().await?;
+                self.publish_optional_i64_control(
+                    logics::MM_DEVICE_NAME,
+                    logics::MM_CONTROL_LAST_SMS,
+                    last_sms,
+                )
+                .await?;
+                info!(
+                    target: LOG_TARGET,
+                    "{}",
+                    logics::mqtt_publish_mm_last_sms_message(last_sms)
+                );
+            }
             MqttCommand::EnsureModemDevice { modem_id } => {
                 let modem_index = self.ensure_modem_device(&modem_id).await?;
                 info!(
@@ -163,6 +203,59 @@ impl MqttFrontend {
                     )
                 );
             }
+            MqttCommand::PublishModemSmsCount {
+                modem_id,
+                sms_count,
+            } => {
+                let modem_index = self.ensure_modem_device(&modem_id).await?;
+                let device_name = logics::device_name_for_modem(modem_index);
+                self.publish_number_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SMS_COUNT,
+                    sms_count,
+                )
+                .await?;
+                info!(
+                    target: LOG_TARGET,
+                    "{}",
+                    logics::mqtt_publish_modem_sms_count_message(modem_index, &modem_id.0, sms_count)
+                );
+            }
+            MqttCommand::PublishModemSmsSelection {
+                modem_id,
+                selected_index,
+                max_index,
+                writable,
+            } => {
+                let modem_index = self.ensure_modem_device(&modem_id).await?;
+                self.publish_modem_sms_selection(modem_index, selected_index, max_index, writable)
+                    .await?;
+                info!(
+                    target: LOG_TARGET,
+                    "{}",
+                    logics::mqtt_publish_modem_sms_selection_message(
+                        modem_index,
+                        &modem_id.0,
+                        selected_index,
+                        max_index,
+                        writable,
+                    )
+                );
+            }
+            MqttCommand::PublishSelectedSms { modem_id, snapshot } => {
+                let modem_index = self.ensure_modem_device(&modem_id).await?;
+                self.publish_selected_sms(modem_index, snapshot.as_ref())
+                    .await?;
+                info!(
+                    target: LOG_TARGET,
+                    "{}",
+                    logics::mqtt_publish_selected_sms_message(
+                        modem_index,
+                        &modem_id.0,
+                        snapshot.as_ref().map(SmsSnapshot::summary).as_deref(),
+                    )
+                );
+            }
             MqttCommand::DeleteModemDevice { modem_id } => {
                 if let Some(modem_index) = self.state.remove_modem_index(&modem_id) {
                     self.cleanup_modem_device(modem_index).await?;
@@ -173,6 +266,52 @@ impl MqttFrontend {
                     );
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_incoming_publish(
+        &self,
+        publish: Publish,
+        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+    ) -> Result<()> {
+        let Some(modem_index) = parse_message_select_topic(&publish.topic) else {
+            return Ok(());
+        };
+        let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
+            return Ok(());
+        };
+        // WB writable controls are driven through the `/on` topic. Here we
+        // translate the user-facing modem index back into the internal DBus
+        // modem id before handing control to the tresher.
+        let Ok(payload) = std::str::from_utf8(&publish.payload) else {
+            debug!(
+                target: LOG_TARGET,
+                "Ignoring non-UTF8 message_select payload in topic `{}`",
+                publish.topic
+            );
+            return Ok(());
+        };
+        let payload = payload.trim();
+        let Ok(selected_index) = payload.parse::<u32>() else {
+            debug!(
+                target: LOG_TARGET,
+                "Ignoring invalid message_select payload `{payload}` in topic `{}`",
+                publish.topic
+            );
+            return Ok(());
+        };
+
+        if mqtt_event_tx
+            .send(MqttEvent::SelectModemSms {
+                modem_id,
+                selected_index,
+            })
+            .await
+            .is_err()
+        {
+            debug!(target: LOG_TARGET, "MQTT event channel closed while sending");
         }
 
         Ok(())
@@ -194,10 +333,6 @@ impl MqttFrontend {
                 .await?;
         }
 
-        // `is_available` is our daemon capability marker: while the bridge is
-        // alive and connected to MQTT, it is `1`. If the daemon crashes, the
-        // MQTT Last Will clears this retained value and the UI sees MM as
-        // unavailable even if DBus data remains cached elsewhere.
         self.publish_text_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_IS_AVAILABLE, "1")
             .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_STATUS)
@@ -205,6 +340,10 @@ impl MqttFrontend {
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_VERSION)
             .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_MODEM_COUNT)
+            .await?;
+        self.publish_number_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_SMS_COUNT, 0)
+            .await?;
+        self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_LAST_SMS)
             .await?;
 
         self.state.manager_device_created = true;
@@ -228,6 +367,7 @@ impl MqttFrontend {
             self.publish_control_metadata(&device_name, spec).await?;
         }
 
+        self.subscribe_to_message_select(modem_index).await?;
         self.publish_text_control(&device_name, logics::MODEM_CONTROL_IS_ACTIVE, "0")
             .await?;
         self.publish_null_control(&device_name, logics::MODEM_CONTROL_MODEL)
@@ -242,8 +382,26 @@ impl MqttFrontend {
             .await?;
         self.publish_null_control(&device_name, logics::MODEM_CONTROL_SIGNAL_QUALITY)
             .await?;
+        self.publish_number_control(&device_name, logics::MODEM_CONTROL_SMS_COUNT, 0)
+            .await?;
+        self.publish_modem_sms_selection(modem_index, None, 1, false)
+            .await?;
+        self.publish_selected_sms(modem_index, None).await?;
 
         Ok(modem_index)
+    }
+
+    async fn subscribe_to_message_select(&mut self, modem_index: u32) -> Result<()> {
+        if !self.state.subscribed_message_select.insert(modem_index) {
+            return Ok(());
+        }
+
+        let device_name = logics::device_name_for_modem(modem_index);
+        let topic = logics::control_on_topic(&device_name, logics::MODEM_CONTROL_MESSAGE_SELECT);
+        self.client
+            .subscribe(topic.clone(), QoS::AtMostOnce)
+            .await
+            .with_context(|| format!("failed to subscribe to MQTT topic `{topic}`"))
     }
 
     async fn publish_modem_snapshot(
@@ -348,6 +506,91 @@ impl MqttFrontend {
         Ok(())
     }
 
+    async fn publish_modem_sms_selection(
+        &self,
+        modem_index: u32,
+        selected_index: Option<u32>,
+        max_index: u32,
+        writable: bool,
+    ) -> Result<()> {
+        let device_name = logics::device_name_for_modem(modem_index);
+        let spec = logics::dynamic_message_select_spec(!writable, max_index);
+        self.publish_control_metadata(&device_name, &spec).await?;
+
+        match selected_index {
+            Some(selected_index) => {
+                self.publish_number_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_MESSAGE_SELECT,
+                    selected_index,
+                )
+                .await?;
+            }
+            None => {
+                self.publish_number_control(&device_name, logics::MODEM_CONTROL_MESSAGE_SELECT, 1)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn publish_selected_sms(
+        &self,
+        modem_index: u32,
+        snapshot: Option<&SmsSnapshot>,
+    ) -> Result<()> {
+        let device_name = logics::device_name_for_modem(modem_index);
+
+        match snapshot {
+            Some(snapshot) => {
+                self.publish_optional_i64_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
+                    snapshot.timestamp,
+                )
+                .await?;
+                self.publish_optional_text_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_SENDER,
+                    snapshot.number.as_deref(),
+                )
+                .await?;
+                self.publish_optional_text_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_TEXT,
+                    snapshot.text.as_deref(),
+                )
+                .await?;
+                self.publish_text_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
+                    switch_payload(snapshot.is_received),
+                )
+                .await?;
+            }
+            None => {
+                self.publish_null_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
+                )
+                .await?;
+                self.publish_null_control(&device_name, logics::MODEM_CONTROL_SELECTED_SMS_SENDER)
+                    .await?;
+                self.publish_null_control(&device_name, logics::MODEM_CONTROL_SELECTED_SMS_TEXT)
+                    .await?;
+                self.publish_text_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
+                    "0",
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn cleanup_session(&mut self) -> Result<()> {
         let modem_entries: Vec<_> = self
             .state
@@ -438,6 +681,21 @@ impl MqttFrontend {
         .await
     }
 
+    async fn publish_optional_i64_control(
+        &self,
+        device_name: &str,
+        control_name: &str,
+        value: Option<i64>,
+    ) -> Result<()> {
+        match value {
+            Some(value) => {
+                self.publish_number_control(device_name, control_name, value)
+                    .await
+            }
+            None => self.publish_null_control(device_name, control_name).await,
+        }
+    }
+
     async fn publish_optional_text_control(
         &self,
         device_name: &str,
@@ -516,6 +774,8 @@ impl MqttFrontend {
 struct MqttSessionState {
     manager_device_created: bool,
     modem_indices: HashMap<ModemId, u32>,
+    reverse_modem_indices: HashMap<u32, ModemId>,
+    subscribed_message_select: HashSet<u32>,
 }
 
 impl MqttSessionState {
@@ -530,11 +790,20 @@ impl MqttSessionState {
         }
 
         self.modem_indices.insert(modem_id.clone(), candidate);
+        self.reverse_modem_indices
+            .insert(candidate, modem_id.clone());
         (candidate, true)
     }
 
     fn remove_modem_index(&mut self, modem_id: &ModemId) -> Option<u32> {
-        self.modem_indices.remove(modem_id)
+        let modem_index = self.modem_indices.remove(modem_id)?;
+        self.reverse_modem_indices.remove(&modem_index);
+        self.subscribed_message_select.remove(&modem_index);
+        Some(modem_index)
+    }
+
+    fn modem_id_for_index(&self, modem_index: u32) -> Option<&ModemId> {
+        self.reverse_modem_indices.get(&modem_index)
     }
 }
 
@@ -565,6 +834,7 @@ fn build_mqtt_options(mqtt_address: Option<&str>) -> Result<MqttOptions> {
 async fn run_eventloop(
     stop_rx: watch::Receiver<bool>,
     mut eventloop: rumqttc::EventLoop,
+    incoming_publish_tx: mpsc::Sender<Publish>,
 ) -> Result<()> {
     let mut connected = false;
     let stop_rx = stop_rx;
@@ -577,11 +847,16 @@ async fn run_eventloop(
                     debug!(target: LOG_TARGET, "{}", logics::mqtt_connected_message());
                 }
             }
+            Ok(Event::Incoming(Packet::Publish(publish))) => {
+                if incoming_publish_tx.send(publish).await.is_err() {
+                    return Ok(());
+                }
+            }
             Ok(Event::Outgoing(rumqttc::Outgoing::Disconnect)) if *stop_rx.borrow() => {
                 return Ok(());
             }
             Ok(_) => {}
-            Err(err) if *stop_rx.borrow() => {
+            Err(_) if *stop_rx.borrow() => {
                 return Ok(());
             }
             Err(err) => {
@@ -648,6 +923,13 @@ fn control_spec_by_name(control_name: &str) -> Option<&'static ControlSpec> {
         .find(|spec| spec.name == control_name)
 }
 
+fn parse_message_select_topic(topic: &str) -> Option<u32> {
+    let prefix = format!("/devices/{}", logics::MM_MODEM_DEVICE_PREFIX);
+    let suffix = format!("/controls/{}/on", logics::MODEM_CONTROL_MESSAGE_SELECT);
+    let modem_index = topic.strip_prefix(&prefix)?.strip_suffix(&suffix)?;
+    modem_index.parse::<u32>().ok()
+}
+
 fn modemmanager_status_name(status: ModemManagerStatus) -> &'static str {
     match status {
         ModemManagerStatus::Active => "active",
@@ -660,8 +942,6 @@ fn switch_payload(value: bool) -> &'static str {
     if value { "1" } else { "0" }
 }
 
-/// Mirrors the DBus loop helper so both subsystems react to shutdown in the
-/// same way.
 async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()> {
     loop {
         if *shutdown_rx.borrow() {
@@ -676,7 +956,7 @@ async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{MqttEndpoint, MqttSessionState, parse_mqtt_endpoint};
+    use super::{MqttEndpoint, MqttSessionState, parse_message_select_topic, parse_mqtt_endpoint};
     use crate::dbus::ModemId;
 
     #[test]
@@ -714,5 +994,17 @@ mod tests {
         assert_eq!((first, first_created), (1, true));
         assert_eq!((second, second_created), (2, true));
         assert_eq!((reused, reused_created), (1, true));
+    }
+
+    #[test]
+    fn parses_message_select_topic() {
+        assert_eq!(
+            parse_message_select_topic("/devices/mm_modem_3/controls/message_select/on"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_message_select_topic("/devices/mm_modem_3/controls/model/on"),
+            None
+        );
     }
 }

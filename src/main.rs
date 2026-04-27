@@ -19,11 +19,13 @@ const DBUS_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const DBUS_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const DBUS_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
+const DBUS_COMMAND_CHANNEL_CAPACITY: usize = 32;
 
 const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 const MQTT_COMMAND_CHANNEL_CAPACITY: usize = 32;
+const MQTT_EVENT_CHANNEL_CAPACITY: usize = 32;
 const LOG_TARGET: &str = "MAIN";
 
 #[tokio::main]
@@ -97,14 +99,24 @@ async fn run_supervisor(
         }
 
         let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
+        let (mqtt_event_tx, mqtt_event_rx) = mpsc::channel(MQTT_EVENT_CHANNEL_CAPACITY);
         let (mqtt_command_tx, mqtt_command_rx) = mpsc::channel(MQTT_COMMAND_CHANNEL_CAPACITY);
+        let (dbus_command_sender_tx, dbus_command_sender_rx) =
+            watch::channel(None::<mpsc::Sender<exchange::DbusCommand>>);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
         let mut mqtt_task = tokio::spawn(mqtt::run(
             mqtt_address.clone(),
             mqtt_stop_rx.clone(),
             mqtt_command_rx,
+            mqtt_event_tx,
         ));
-        let tresher_task = tokio::spawn(tresher::run(mqtt_stop_rx, dbus_event_rx, mqtt_command_tx));
+        let tresher_task = tokio::spawn(tresher::run(
+            mqtt_stop_rx,
+            dbus_event_rx,
+            mqtt_event_rx,
+            mqtt_command_tx,
+            dbus_command_sender_rx,
+        ));
 
         match run_dbus_lifecycle(
             dbus_address.clone(),
@@ -112,6 +124,7 @@ async fn run_supervisor(
             &mqtt_stop_tx,
             &mut mqtt_task,
             dbus_event_tx,
+            &dbus_command_sender_tx,
         )
         .await?
         {
@@ -155,20 +168,25 @@ async fn run_dbus_lifecycle(
     mqtt_stop_tx: &watch::Sender<bool>,
     mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
     dbus_event_tx: mpsc::Sender<exchange::DbusEvent>,
+    dbus_command_sender_tx: &watch::Sender<Option<mpsc::Sender<exchange::DbusCommand>>>,
 ) -> Result<SupervisorExit> {
     let mut dbus_retry_attempt = 1;
 
     loop {
+        let (dbus_command_tx, dbus_command_rx) = mpsc::channel(DBUS_COMMAND_CHANNEL_CAPACITY);
+        let _ = dbus_command_sender_tx.send(Some(dbus_command_tx));
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
         let mut dbus_task = tokio::spawn(dbus::run(
             dbus_address.clone(),
             dbus_stop_rx,
+            dbus_command_rx,
             dbus_event_tx.clone(),
         ));
 
         let retry_delay = tokio::select! {
             result = wait_for_shutdown(shutdown_rx) => {
                 result?;
+                let _ = dbus_command_sender_tx.send(None);
                 stop_child_task("DBus", dbus_stop_tx, dbus_task).await?;
                 let _ = mqtt_stop_tx.send(true);
                 return Ok(SupervisorExit::Shutdown);
@@ -176,12 +194,14 @@ async fn run_dbus_lifecycle(
             mqtt_result = &mut *mqtt_task => {
                 log_unexpected_task_exit("MQTT", mqtt_result)?;
                 info!(target: LOG_TARGET, "Stopping DBus because MQTT connection is unavailable.");
+                let _ = dbus_command_sender_tx.send(None);
                 let _ = dbus_stop_tx.send(true);
                 stop_finished_or_stopping_task("DBus", dbus_task).await?;
                 return Ok(SupervisorExit::MqttEnded);
             }
             dbus_result = &mut dbus_task => {
                 log_unexpected_task_exit("DBus", dbus_result)?;
+                let _ = dbus_command_sender_tx.send(None);
                 debug!(target: LOG_TARGET, "{}", dbus::modemmanager_not_found_message());
                 if dbus_event_tx
                     .send(exchange::DbusEvent::StatusChanged(
@@ -214,11 +234,13 @@ async fn run_dbus_lifecycle(
         tokio::select! {
             result = wait_for_shutdown(shutdown_rx) => {
                 result?;
+                let _ = dbus_command_sender_tx.send(None);
                 let _ = mqtt_stop_tx.send(true);
                 return Ok(SupervisorExit::Shutdown);
             }
             mqtt_result = &mut *mqtt_task => {
                 log_unexpected_task_exit("MQTT", mqtt_result)?;
+                let _ = dbus_command_sender_tx.send(None);
                 return Ok(SupervisorExit::MqttEnded);
             }
             _ = sleep(retry_delay) => {}

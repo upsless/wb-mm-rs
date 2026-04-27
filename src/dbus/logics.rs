@@ -1,3 +1,5 @@
+use time::{OffsetDateTime, format_description::well_known::Iso8601};
+
 /// Well-known DBus service name used by ModemManager.
 pub const DBUS_BUS_NAME: &str = "org.freedesktop.DBus";
 pub const DBUS_OBJ_PATH: &str = "/org/freedesktop/DBus";
@@ -9,7 +11,9 @@ pub const MM_BUS_NAME: &str = "org.freedesktop.ModemManager1";
 pub const MM_OBJ_PATH: &str = "/org/freedesktop/ModemManager1";
 pub const MM_INTERFACE: &str = "org.freedesktop.ModemManager1";
 pub const MM_MODEM_INTERFACE: &str = "org.freedesktop.ModemManager1.Modem";
+pub const MM_MODEM_MESSAGING_INTERFACE: &str = "org.freedesktop.ModemManager1.Modem.Messaging";
 pub const MM_SIM_INTERFACE: &str = "org.freedesktop.ModemManager1.Sim";
+pub const MM_SMS_INTERFACE: &str = "org.freedesktop.ModemManager1.Sms";
 
 /// Small, explicit description of a watched DBus signal.
 ///
@@ -56,6 +60,11 @@ pub const MM_INTERFACES_REMOVED_SIGNAL: DbusSignalSpec = DbusSignalSpec {
     member: "InterfacesRemoved",
 };
 
+pub const MM_SMS_STATE_CHANGED_SIGNAL_ID: &str = "mm_sms_state_changed";
+pub const MM_SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
+pub const MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
+pub const MM_SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
+
 /// Small, reviewable state model for stage 0.
 ///
 /// We intentionally keep this separate from the async runtime code so the
@@ -78,6 +87,10 @@ pub struct ModemManagerSnapshot {
 /// Compact typed modem identifier derived from the DBus object path suffix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModemId(pub String);
+
+/// Compact typed SMS identifier derived from the DBus object path suffix.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmsId(pub String);
 
 /// Full modem snapshot we want to route through the tresher before SMS work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +149,53 @@ impl ModemUpdate {
     }
 }
 
+/// Full SMS snapshot for one incoming message.
+///
+/// We keep the MQTT-facing fields already normalized here:
+/// - `timestamp` is unix time for WB `unixtime` controls;
+/// - `is_received` tells the UI whether the message is complete yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmsSnapshot {
+    pub is_received: bool,
+    pub timestamp: Option<i64>,
+    pub number: Option<String>,
+    pub text: Option<String>,
+}
+
+impl SmsSnapshot {
+    pub fn summary(&self) -> String {
+        format!(
+            "is_received={}, timestamp={}, sender={}, text={}",
+            self.is_received,
+            format_option_i64(self.timestamp),
+            format_option_string(self.number.as_deref()),
+            format_text_summary(self.text.as_deref()),
+        )
+    }
+}
+
+/// Single-field SMS update used for property-change events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmsUpdate {
+    IsReceived(bool),
+    Timestamp(Option<i64>),
+    Number(Option<String>),
+    Text(Option<String>),
+}
+
+impl SmsUpdate {
+    pub fn summary(&self) -> String {
+        match self {
+            SmsUpdate::IsReceived(value) => format!("is_received={value}"),
+            SmsUpdate::Timestamp(value) => format!("timestamp={}", format_option_i64(*value)),
+            SmsUpdate::Number(value) => {
+                format!("sender={}", format_option_string(value.as_deref()))
+            }
+            SmsUpdate::Text(value) => format!("text={}", format_text_summary(value.as_deref())),
+        }
+    }
+}
+
 fn format_option_string(value: Option<&str>) -> String {
     value.unwrap_or("None").to_string()
 }
@@ -144,6 +204,19 @@ fn format_option_u32(value: Option<u32>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "None".to_string())
+}
+
+fn format_option_i64(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn format_text_summary(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("len:{}", value.chars().count()),
+        None => "None".to_string(),
+    }
 }
 
 pub fn dbus_connected_message() -> &'static str {
@@ -194,6 +267,16 @@ pub fn modem_path_from_id(modem_id: &ModemId) -> String {
     format!("{MM_OBJ_PATH}/Modem/{}", modem_id.0)
 }
 
+pub fn sms_id_from_path(path: &str) -> Option<SmsId> {
+    let sms_prefix = format!("{MM_OBJ_PATH}/SMS/");
+    path.strip_prefix(&sms_prefix)
+        .map(|suffix| SmsId(suffix.to_string()))
+}
+
+pub fn sms_path_from_id(sms_id: &SmsId) -> String {
+    format!("{MM_OBJ_PATH}/SMS/{}", sms_id.0)
+}
+
 pub fn modem_state_name(state: i32) -> &'static str {
     match state {
         -1 => "failed",
@@ -227,4 +310,49 @@ pub fn modem_snapshot_message(modem_id: &ModemId, snapshot: &ModemSnapshot) -> S
 
 pub fn modem_update_message(modem_id: &ModemId, update: &ModemUpdate) -> String {
     format!("Modem {} changed: {}", modem_id.0, update.summary())
+}
+
+pub fn sms_snapshot_message(modem_id: &ModemId, sms_id: &SmsId, snapshot: &SmsSnapshot) -> String {
+    format!(
+        "Modem {} SMS {} data: {}",
+        modem_id.0,
+        sms_id.0,
+        snapshot.summary()
+    )
+}
+
+pub fn sms_update_message(modem_id: &ModemId, sms_id: &SmsId, update: &SmsUpdate) -> String {
+    format!(
+        "Modem {} SMS {} changed: {}",
+        modem_id.0,
+        sms_id.0,
+        update.summary()
+    )
+}
+
+pub fn sms_deleted_message(modem_id: &ModemId, sms_id: &SmsId) -> String {
+    format!("Modem {} SMS {} deleted from DBus", modem_id.0, sms_id.0)
+}
+
+pub fn sms_signal_stream_closed_message(signal_id: &str, object_path: &str) -> String {
+    format!("Signal stream closed: {signal_id} ({object_path})")
+}
+
+pub fn is_incoming_sms_pdu(pdu_type: u32) -> bool {
+    matches!(pdu_type, 1 | 32)
+}
+
+pub fn sms_is_received(state: u32) -> bool {
+    state == 3
+}
+
+pub fn parse_sms_timestamp_to_unix(timestamp: &str) -> Option<i64> {
+    let trimmed = timestamp.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    OffsetDateTime::parse(trimmed, &Iso8601::DEFAULT)
+        .ok()
+        .map(|value| value.unix_timestamp())
 }

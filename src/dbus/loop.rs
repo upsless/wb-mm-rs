@@ -16,7 +16,7 @@ use zbus::{
 };
 
 use crate::dbus::logics;
-use crate::exchange::DbusEvent;
+use crate::exchange::{DbusCommand, DbusEvent};
 
 const LOG_TARGET: &str = "DBUS";
 
@@ -42,6 +42,7 @@ struct ActiveModemManagerState {
 pub async fn run(
     dbus_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
+    mut command_rx: mpsc::Receiver<DbusCommand>,
     event_tx: mpsc::Sender<DbusEvent>,
 ) -> Result<()> {
     // Connecting to a remote DBus bridge may block for a while, so we race the
@@ -329,6 +330,13 @@ pub async fn run(
                     )
                     .await?;
                 }
+            }
+            maybe_command = command_rx.recv() => {
+                let Some(command) = maybe_command else {
+                    break;
+                };
+
+                handle_dbus_command(&connection, &event_tx, command).await?;
             }
         }
     }
@@ -642,8 +650,49 @@ async fn run_modem_task(
     let mut sim_changes = modem_proxy
         .receive_property_changed::<OwnedObjectPath>("Sim")
         .await;
+    let messaging_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set modem messaging proxy destination")?
+        .path(modem_path.as_str())
+        .context("failed to set modem messaging proxy path")?
+        .interface(logics::MM_MODEM_MESSAGING_INTERFACE)
+        .context("failed to set modem messaging proxy interface")?
+        .cache_properties(CacheProperties::Yes)
+        .build()
+        .await
+        .with_context(|| format!("failed to create modem messaging proxy for {}", modem_id.0))?;
+    // For SMS inventory we watch the `Messages` property itself. This keeps
+    // the add/remove logic in one place and avoids hand-parsing low-level
+    // Added/Deleted signal payloads in the runtime code.
+    let mut messages_changes = messaging_proxy
+        .receive_property_changed::<Vec<OwnedObjectPath>>("Messages")
+        .await;
 
     let mut snapshot = query_modem_snapshot(&connection, &modem_proxy).await?;
+    let initial_sms_ids = query_modem_sms_ids(&messaging_proxy).await?;
+    emit_event(
+        &event_tx,
+        DbusEvent::SmsListChanged {
+            modem_id: modem_id.clone(),
+            sms_ids: initial_sms_ids.clone(),
+        },
+    )
+    .await;
+    if let Some(initial_selected_sms_id) = initial_sms_ids.first().cloned()
+        && let Some(snapshot) = query_sms_snapshot(&connection, &initial_selected_sms_id).await?
+    {
+        emit_event(
+            &event_tx,
+            DbusEvent::SelectedSmsSnapshot {
+                modem_id: modem_id.clone(),
+                sms_id: initial_selected_sms_id,
+                snapshot,
+            },
+        )
+        .await;
+    }
+    let mut sms_tasks =
+        spawn_initial_sms_tasks(&connection, &modem_id, initial_sms_ids, &event_tx).await?;
 
     info!(target: LOG_TARGET, "{}", logics::modem_found_message(&modem_id));
     emit_event(
@@ -763,10 +812,319 @@ async fn run_modem_task(
                     .await;
                 }
             }
+            change = messages_changes.next() => {
+                let Some(change) = change else { break; };
+                let message_paths = change
+                    .get()
+                    .await
+                    .context("failed to read modem Messages property change")?;
+                let sms_ids = sms_ids_from_paths(&message_paths);
+                sync_sms_tasks(&connection, &modem_id, &event_tx, &mut sms_tasks, sms_ids).await?;
+            }
         }
     }
 
     Ok(())
+}
+
+async fn spawn_initial_sms_tasks(
+    connection: &Connection,
+    modem_id: &logics::ModemId,
+    sms_ids: Vec<logics::SmsId>,
+    event_tx: &mpsc::Sender<DbusEvent>,
+) -> Result<HashMap<logics::SmsId, JoinHandle<()>>> {
+    let mut sms_tasks = HashMap::new();
+
+    for sms_id in sms_ids {
+        if let Some(task) = spawn_sms_task(
+            connection,
+            modem_id.clone(),
+            sms_id.clone(),
+            event_tx.clone(),
+        )
+        .await?
+        {
+            sms_tasks.insert(sms_id, task);
+        }
+    }
+
+    Ok(sms_tasks)
+}
+
+async fn sync_sms_tasks(
+    connection: &Connection,
+    modem_id: &logics::ModemId,
+    event_tx: &mpsc::Sender<DbusEvent>,
+    sms_tasks: &mut HashMap<logics::SmsId, JoinHandle<()>>,
+    current_sms_ids: Vec<logics::SmsId>,
+) -> Result<()> {
+    emit_event(
+        event_tx,
+        DbusEvent::SmsListChanged {
+            modem_id: modem_id.clone(),
+            sms_ids: current_sms_ids.clone(),
+        },
+    )
+    .await;
+
+    let current_sms_ids: std::collections::HashSet<_> = current_sms_ids.into_iter().collect();
+    let tracked_sms_ids: Vec<_> = sms_tasks.keys().cloned().collect();
+
+    for sms_id in tracked_sms_ids {
+        if current_sms_ids.contains(&sms_id) {
+            continue;
+        }
+
+        if let Some(task) = sms_tasks.remove(&sms_id) {
+            task.abort();
+        }
+        info!(
+            target: LOG_TARGET,
+            "{}",
+            logics::sms_deleted_message(modem_id, &sms_id)
+        );
+        emit_event(
+            event_tx,
+            DbusEvent::SmsDeleted {
+                modem_id: modem_id.clone(),
+                sms_id,
+            },
+        )
+        .await;
+    }
+
+    for sms_id in current_sms_ids {
+        if sms_tasks.contains_key(&sms_id) {
+            continue;
+        }
+
+        if let Some(task) = spawn_sms_task(
+            connection,
+            modem_id.clone(),
+            sms_id.clone(),
+            event_tx.clone(),
+        )
+        .await?
+        {
+            sms_tasks.insert(sms_id, task);
+        }
+    }
+
+    Ok(())
+}
+
+async fn spawn_sms_task(
+    connection: &Connection,
+    modem_id: logics::ModemId,
+    sms_id: logics::SmsId,
+    event_tx: mpsc::Sender<DbusEvent>,
+) -> Result<Option<JoinHandle<()>>> {
+    let connection = connection.clone();
+    let Some(snapshot) = query_sms_snapshot(&connection, &sms_id).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some(tokio::spawn(async move {
+        if let Err(err) = run_sms_task(
+            connection,
+            modem_id.clone(),
+            sms_id.clone(),
+            snapshot,
+            event_tx,
+        )
+        .await
+        {
+            debug!(
+                target: LOG_TARGET,
+                "Modem {} SMS {} watcher failed: {err:#}",
+                modem_id.0,
+                sms_id.0
+            );
+        }
+    })))
+}
+
+async fn run_sms_task(
+    connection: Connection,
+    modem_id: logics::ModemId,
+    sms_id: logics::SmsId,
+    mut snapshot: logics::SmsSnapshot,
+    event_tx: mpsc::Sender<DbusEvent>,
+) -> Result<()> {
+    let sms_path = logics::sms_path_from_id(&sms_id);
+    let sms_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set SMS proxy destination")?
+        .path(sms_path.as_str())
+        .context("failed to set SMS proxy path")?
+        .interface(logics::MM_SMS_INTERFACE)
+        .context("failed to set SMS proxy interface")?
+        .cache_properties(CacheProperties::Yes)
+        .build()
+        .await
+        .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
+
+    let mut state_changes = sms_proxy.receive_property_changed::<u32>("State").await;
+    let mut timestamp_changes = sms_proxy
+        .receive_property_changed::<String>("Timestamp")
+        .await;
+    let mut number_changes = sms_proxy.receive_property_changed::<String>("Number").await;
+    let mut text_changes = sms_proxy.receive_property_changed::<String>("Text").await;
+
+    info!(
+        target: LOG_TARGET,
+        "{}",
+        logics::sms_snapshot_message(&modem_id, &sms_id, &snapshot)
+    );
+    emit_event(
+        &event_tx,
+        DbusEvent::SmsSnapshot {
+            modem_id: modem_id.clone(),
+            sms_id: sms_id.clone(),
+            snapshot: snapshot.clone(),
+        },
+    )
+    .await;
+
+    loop {
+        tokio::select! {
+            change = state_changes.next() => {
+                let Some(change) = change else {
+                    debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_STATE_CHANGED_SIGNAL_ID, &sms_path));
+                    break;
+                };
+                let is_received = logics::sms_is_received(
+                    change
+                        .get()
+                        .await
+                        .context("failed to read SMS State property change")?,
+                );
+                if snapshot.is_received != is_received {
+                    snapshot.is_received = is_received;
+                    emit_sms_update(
+                        &event_tx,
+                        &modem_id,
+                        &sms_id,
+                        logics::SmsUpdate::IsReceived(is_received),
+                    )
+                    .await;
+                }
+            }
+            change = timestamp_changes.next() => {
+                let Some(change) = change else {
+                    debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID, &sms_path));
+                    break;
+                };
+                let timestamp = logics::parse_sms_timestamp_to_unix(
+                    &change
+                        .get()
+                        .await
+                        .context("failed to read SMS Timestamp property change")?,
+                );
+                if snapshot.timestamp != timestamp {
+                    snapshot.timestamp = timestamp;
+                    emit_sms_update(
+                        &event_tx,
+                        &modem_id,
+                        &sms_id,
+                        logics::SmsUpdate::Timestamp(timestamp),
+                    )
+                    .await;
+                }
+            }
+            change = number_changes.next() => {
+                let Some(change) = change else {
+                    debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_NUMBER_CHANGED_SIGNAL_ID, &sms_path));
+                    break;
+                };
+                let number = normalize_string(
+                    change
+                        .get()
+                        .await
+                        .context("failed to read SMS Number property change")?,
+                );
+                if snapshot.number != number {
+                    snapshot.number = number.clone();
+                    emit_sms_update(
+                        &event_tx,
+                        &modem_id,
+                        &sms_id,
+                        logics::SmsUpdate::Number(number),
+                    )
+                    .await;
+                }
+            }
+            change = text_changes.next() => {
+                let Some(change) = change else {
+                    debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_TEXT_CHANGED_SIGNAL_ID, &sms_path));
+                    break;
+                };
+                let text = normalize_string(
+                    change
+                        .get()
+                        .await
+                        .context("failed to read SMS Text property change")?,
+                );
+                if snapshot.text != text {
+                    snapshot.text = text.clone();
+                    emit_sms_update(
+                        &event_tx,
+                        &modem_id,
+                        &sms_id,
+                        logics::SmsUpdate::Text(text),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn emit_sms_update(
+    event_tx: &mpsc::Sender<DbusEvent>,
+    modem_id: &logics::ModemId,
+    sms_id: &logics::SmsId,
+    update: logics::SmsUpdate,
+) {
+    info!(
+        target: LOG_TARGET,
+        "{}",
+        logics::sms_update_message(modem_id, sms_id, &update)
+    );
+    emit_event(
+        event_tx,
+        DbusEvent::SmsUpdated {
+            modem_id: modem_id.clone(),
+            sms_id: sms_id.clone(),
+            update,
+        },
+    )
+    .await;
+}
+
+async fn query_modem_sms_ids(messaging_proxy: &Proxy<'_>) -> Result<Vec<logics::SmsId>> {
+    let message_paths: Vec<OwnedObjectPath> = messaging_proxy
+        .get_property("Messages")
+        .await
+        .context("failed to read modem Messages property")?;
+
+    Ok(sms_ids_from_paths(&message_paths))
+}
+
+fn sms_ids_from_paths(message_paths: &[OwnedObjectPath]) -> Vec<logics::SmsId> {
+    let mut sms_ids: Vec<_> = message_paths
+        .iter()
+        .filter_map(|path| logics::sms_id_from_path(path.as_str()))
+        .collect();
+    sms_ids.sort_by(
+        |left, right| match (left.0.parse::<u32>(), right.0.parse::<u32>()) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            _ => left.0.cmp(&right.0),
+        },
+    );
+    sms_ids
 }
 
 async fn query_modem_snapshot(
@@ -809,6 +1167,80 @@ async fn query_modem_snapshot(
     })
 }
 
+async fn query_sms_snapshot(
+    connection: &Connection,
+    sms_id: &logics::SmsId,
+) -> Result<Option<logics::SmsSnapshot>> {
+    let sms_path = logics::sms_path_from_id(sms_id);
+    let sms_proxy: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(logics::MM_BUS_NAME)
+        .context("failed to set SMS proxy destination")?
+        .path(sms_path.as_str())
+        .context("failed to set SMS proxy path")?
+        .interface(logics::MM_SMS_INTERFACE)
+        .context("failed to set SMS proxy interface")?
+        .cache_properties(CacheProperties::Yes)
+        .build()
+        .await
+        .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
+
+    let pdu_type: u32 = sms_proxy
+        .get_property("PduType")
+        .await
+        .context("failed to read SMS PduType property")?;
+    if !logics::is_incoming_sms_pdu(pdu_type) {
+        return Ok(None);
+    }
+
+    let state: u32 = sms_proxy
+        .get_property("State")
+        .await
+        .context("failed to read SMS State property")?;
+    let timestamp: String = sms_proxy
+        .get_property("Timestamp")
+        .await
+        .context("failed to read SMS Timestamp property")?;
+    let number: String = sms_proxy
+        .get_property("Number")
+        .await
+        .context("failed to read SMS Number property")?;
+    let text: String = sms_proxy
+        .get_property("Text")
+        .await
+        .context("failed to read SMS Text property")?;
+
+    Ok(Some(logics::SmsSnapshot {
+        is_received: logics::sms_is_received(state),
+        timestamp: logics::parse_sms_timestamp_to_unix(&timestamp),
+        number: normalize_string(number),
+        text: normalize_string(text),
+    }))
+}
+
+async fn handle_dbus_command(
+    connection: &Connection,
+    event_tx: &mpsc::Sender<DbusEvent>,
+    command: DbusCommand,
+) -> Result<()> {
+    match command {
+        DbusCommand::RefreshSelectedSms { modem_id, sms_id } => {
+            if let Some(snapshot) = query_sms_snapshot(connection, &sms_id).await? {
+                emit_event(
+                    event_tx,
+                    DbusEvent::SelectedSmsSnapshot {
+                        modem_id,
+                        sms_id,
+                        snapshot,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn query_operator_name(
     connection: &Connection,
     sim_path: OwnedObjectPath,
@@ -838,6 +1270,10 @@ async fn query_operator_name(
     } else {
         Ok(Some(operator_name))
     }
+}
+
+fn normalize_string(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
 }
 
 async fn emit_modem_update(

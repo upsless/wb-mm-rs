@@ -10,6 +10,8 @@ starting a new Codex chat.
 - Reference fork available to GitHub connector: `upsless/wb-mm-mqtt`.
 - Upstream reference: `AbyssDiggers/wb-mm-mqtt`.
 - Test target: `wb.loc`; development machines can reach MQTT and DBus there.
+- Canonical MQTT device/control conventions reference:
+  `https://github.com/wirenboard/conventions/blob/main/README.md`
 
 ## Current Direction
 
@@ -38,6 +40,8 @@ Planned async components:
 - Use current Wiren Board MQTT naming for new topics: lowercase words separated
   by underscores. Do not copy old names like `IsAvailable`, `ModemsCount`,
   `SignalQuality`, or `mm-modem-1` unless explicit compatibility is needed.
+- Treat `wirenboard/conventions` README as the source of truth for MQTT
+  device/control shape, metadata, control types, and compatibility details.
 - Preserve old `wb-mm-mqtt` Last Will semantics: if the daemon dies,
   ModemManager must become unavailable in the UI/control model. The
   availability control is a daemon capability marker, not only a cached DBus
@@ -111,6 +115,31 @@ Planned async components:
   `ModemCountChanged`.
 - Stage 0.2 also now includes typed per-modem events:
   `ModemFound`, `ModemSnapshot`, `ModemUpdated`, and `ModemDeleted`.
+- SMS support is now partially implemented end-to-end:
+  - DBus watches per-modem `Modem.Messaging.Messages` plus per-SMS property
+    changes;
+  - the authoritative SMS order comes from the modem `Messages` property after
+    stripping the constant `/org/freedesktop/ModemManager1/SMS/` prefix and
+    sorting by the resulting numeric short ids;
+  - MQTT-side human selection numbering still starts from `1`, but tresher
+    maps that back to the ordered DBus short-id list;
+  - manager MQTT device publishes `sms_count` and `last_sms`;
+  - each modem device publishes `sms_count`, writable `message_select`, and
+    selected-SMS fields (`selected_sms_timestamp`, `selected_sms_sender`,
+    `selected_sms_text`, `selected_sms_is_received`);
+  - SMS timestamps are normalized to unix time before MQTT publish;
+  - user writes to `message_select/on` are routed through
+    `MQTT -> Tresher -> DBUS -> Tresher -> MQTT`.
+- Live verification on `wb.loc` confirmed:
+  - manager topics publish `sms_count` and `last_sms` with `meta/type=unixtime`;
+  - modem topics publish SMS count and selected-SMS fields;
+  - after the short-id rewrite, the initial selected SMS is the first element
+    of the ordered `Messages` list (`message_select=1`);
+  - writing a new value to `/devices/mm_modem_1/controls/message_select/on`
+    updates the selected-SMS MQTT topics.
+- Live SMS add/delete/change events could not yet be tested against the modem
+  because the current SIM is operator-blocked; only initial snapshot and
+  MQTT-to-DBus selection flow are verified so far.
 - MQTT-facing modem numbering now starts from `1` even if the DBus modem id is
   `0`. The daemon keeps the DBus id internally and maps it to user-facing WB
   device names such as `mm_modem_1`.
@@ -122,6 +151,8 @@ Planned async components:
 - Current log formatting uses explicit component targets, mirroring the python
   project's style more closely:
   `MAIN`, `DBUS`, `MQTT`, and `DISP`.
+- SMS timestamp controls should use WB's dedicated unix-time control type:
+  `meta/type=unixtime`, payload = integer unix time.
 
 ## Known Reference Findings
 
@@ -151,9 +182,10 @@ Planned async components:
    - keep local debug runner defaults for remote DBus access through
      `unixexec:path=ssh,argv1=-T,argv2=-q,argv3=root@wb.loc,argv4=systemd-stdio-bridge`.
 2. Build out stage 0.2 from manager-level exchange to richer mappings:
-   - SMS events and fields are still not implemented;
    - real MQTT publishing is in place, but topic/control semantics may still
      need small alignment passes against WB UI expectations;
+   - live SMS runtime events (new, deleted, partial-to-complete) still need
+     verification on a working SIM;
    - keep the event/command types compact and reviewable as the DBus/MQTT
      surface grows.
 3. Implement stage 1:
@@ -168,5 +200,6 @@ Planned async components:
 1. ModemManager device with version/modem count and service/modem change tests.
 2. Per-modem device with basic characteristics, DBus/MQTT/daemon failure
    behavior, cleanup, Last Will checks, and unit tests.
-3. SMS data: counts, last SMS time, SMS viewing in modem device, and unit tests.
-4. MQTT-to-DBus user actions routed through tresher, with unit tests.
+3. SMS data hardening: live runtime event verification, edge cases for partial
+   messages, and unit tests.
+4. MQTT-to-DBus user actions hardening and unit tests.
