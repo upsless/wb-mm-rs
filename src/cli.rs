@@ -6,4 +6,7 @@ use clap::Parser;
 pub struct Cli {
     #[arg(long)]
     pub dbus_address: Option<String>,
+
+    #[arg(long)]
+    pub mqtt_address: Option<String>,
 }

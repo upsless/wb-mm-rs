@@ -147,20 +147,20 @@ fn format_option_u32(value: Option<u32>) -> String {
 }
 
 pub fn dbus_connected_message() -> &'static str {
-    "DBus connection established"
+    "Connection established"
 }
 
 pub fn dbus_stopped_before_connect_message() -> &'static str {
-    "DBus loop stopped before connection was established"
+    "Stopped before connection was established"
 }
 
 pub fn dbus_stopped_message() -> &'static str {
-    "DBus connection closed"
+    "Connection closed"
 }
 
 pub fn dbus_signal_stream_closed_message(signal: DbusSignalSpec) -> String {
     format!(
-        "ModemManager DBus signal stream closed: {} ({} {} {}.{})",
+        "Signal stream closed: {} ({} {} {}.{})",
         signal.id, signal.bus_name, signal.path, signal.interface, signal.member
     )
 }

@@ -18,6 +18,8 @@ use zbus::{
 use crate::dbus::logics;
 use crate::exchange::DbusEvent;
 
+const LOG_TARGET: &str = "DBUS";
+
 /// Active-only ModemManager watchers.
 ///
 /// We rebuild this bundle every time the ModemManager DBus name becomes active.
@@ -49,12 +51,12 @@ pub async fn run(
         result = connect(dbus_address.as_deref()) => result?,
         result = wait_for_shutdown(&mut shutdown_rx) => {
             result?;
-            debug!("{}", logics::dbus_stopped_before_connect_message());
+            debug!(target: LOG_TARGET, "{}", logics::dbus_stopped_before_connect_message());
             return Ok(());
         }
     };
 
-    debug!("{}", logics::dbus_connected_message());
+    debug!(target: LOG_TARGET, "{}", logics::dbus_connected_message());
 
     // The standard org.freedesktop.DBus proxy tells us whether the
     // ModemManager well-known name currently has an owner and when that owner
@@ -64,7 +66,7 @@ pub async fn run(
         .context("failed to create org.freedesktop.DBus proxy")?;
 
     let mut mm_status = query_modemmanager_status(&dbus_proxy).await?;
-    info!("{}", logics::modemmanager_status_message(mm_status));
+    info!(target: LOG_TARGET, "{}", logics::modemmanager_status_message(mm_status));
     emit_event(&event_tx, DbusEvent::StatusChanged(mm_status)).await;
 
     let mut mm_snapshot = None;
@@ -114,6 +116,7 @@ pub async fn run(
             change = mm_status_changes.next() => {
                 let Some(change) = change else {
                     debug!(
+                        target: LOG_TARGET,
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_NAME_OWNER_CHANGED_SIGNAL)
                     );
@@ -127,7 +130,7 @@ pub async fn run(
                 let new_status = query_modemmanager_status(&dbus_proxy).await?;
                 if new_status != mm_status {
                     mm_status = new_status;
-                    info!("{}", logics::modemmanager_status_message(mm_status));
+                    info!(target: LOG_TARGET, "{}", logics::modemmanager_status_message(mm_status));
                     emit_event(
                         &event_tx,
                         DbusEvent::StatusChanged(mm_status),
@@ -182,6 +185,7 @@ pub async fn run(
             }, if mm_version_changes.is_some() => {
                 let Some(version) = version? else {
                     debug!(
+                        target: LOG_TARGET,
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_VERSION_CHANGED_SIGNAL)
                     );
@@ -202,7 +206,7 @@ pub async fn run(
                     && mm_modem_count_known
                 {
                     snapshot.version = version;
-                    info!("{}", logics::modemmanager_snapshot_message(snapshot));
+                    info!(target: LOG_TARGET, "{}", logics::modemmanager_snapshot_message(snapshot));
                     emit_event(
                         &event_tx,
                         DbusEvent::Snapshot {
@@ -238,6 +242,7 @@ pub async fn run(
             }, if mm_interfaces_added.is_some() => {
                 let Some(added_modem) = added_modem? else {
                     debug!(
+                        target: LOG_TARGET,
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_ADDED_SIGNAL)
                     );
@@ -292,6 +297,7 @@ pub async fn run(
             }, if mm_interfaces_removed.is_some() => {
                 let Some(removed_modem) = removed_modem? else {
                     debug!(
+                        target: LOG_TARGET,
                         "{}",
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_REMOVED_SIGNAL)
                     );
@@ -313,7 +319,7 @@ pub async fn run(
                     {
                         task.abort();
                     }
-                    info!("{}", logics::modem_deleted_message(&modem_id));
+                    info!(target: LOG_TARGET, "{}", logics::modem_deleted_message(&modem_id));
                     emit_event(&event_tx, DbusEvent::ModemDeleted { modem_id }).await;
                     sync_modem_count(
                         mm_snapshot.as_mut(),
@@ -327,7 +333,7 @@ pub async fn run(
         }
     }
 
-    debug!("{}", logics::dbus_stopped_message());
+    debug!(target: LOG_TARGET, "{}", logics::dbus_stopped_message());
 
     Ok(())
 }
@@ -480,7 +486,7 @@ async fn sync_modem_count(
     if !*modem_count_known {
         snapshot.modem_count = modem_count;
         *modem_count_known = true;
-        info!("{}", logics::modemmanager_snapshot_message(snapshot));
+        info!(target: LOG_TARGET, "{}", logics::modemmanager_snapshot_message(snapshot));
         emit_event(
             event_tx,
             DbusEvent::Snapshot {
@@ -492,6 +498,7 @@ async fn sync_modem_count(
     } else if snapshot.modem_count != modem_count {
         snapshot.modem_count = modem_count;
         info!(
+            target: LOG_TARGET,
             "{}",
             logics::modemmanager_modem_count_changed_message(modem_count)
         );
@@ -503,7 +510,7 @@ async fn sync_modem_count(
 
 async fn emit_event(event_tx: &mpsc::Sender<DbusEvent>, event: DbusEvent) {
     if event_tx.send(event).await.is_err() {
-        debug!("DBus event channel closed while sending");
+        debug!(target: LOG_TARGET, "Event channel closed while sending");
     }
 }
 
@@ -550,7 +557,7 @@ async fn query_modem_ids(object_manager: &ObjectManagerProxy<'_>) -> Result<Vec<
         .await
         .context("failed to read ModemManager managed objects")?;
 
-    Ok(managed_objects
+    let mut modem_ids: Vec<_> = managed_objects
         .iter()
         .filter(|(_, interfaces)| {
             interfaces
@@ -558,7 +565,19 @@ async fn query_modem_ids(object_manager: &ObjectManagerProxy<'_>) -> Result<Vec<
                 .any(|name| name.as_str() == logics::MM_MODEM_INTERFACE)
         })
         .filter_map(|(path, _)| logics::modem_id_from_path(path.as_str()))
-        .collect())
+        .collect();
+
+    // DBus managed objects arrive as a map, so the raw iteration order is not
+    // guaranteed. Sorting the discovered modem ids keeps the user-facing MQTT
+    // numbering more stable after reconnects and cold starts.
+    modem_ids.sort_by(
+        |left, right| match (left.0.parse::<u32>(), right.0.parse::<u32>()) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            _ => left.0.cmp(&right.0),
+        },
+    );
+
+    Ok(modem_ids)
 }
 
 async fn spawn_initial_modem_tasks(
@@ -584,7 +603,7 @@ fn spawn_modem_task(
     let connection = connection.clone();
     tokio::spawn(async move {
         if let Err(err) = run_modem_task(connection, modem_id.clone(), event_tx).await {
-            debug!("Modem {} watcher failed: {err:#}", modem_id.0);
+            debug!(target: LOG_TARGET, "Modem {} watcher failed: {err:#}", modem_id.0);
         }
     })
 }
@@ -626,7 +645,7 @@ async fn run_modem_task(
 
     let mut snapshot = query_modem_snapshot(&connection, &modem_proxy).await?;
 
-    info!("{}", logics::modem_found_message(&modem_id));
+    info!(target: LOG_TARGET, "{}", logics::modem_found_message(&modem_id));
     emit_event(
         &event_tx,
         DbusEvent::ModemFound {
@@ -635,7 +654,7 @@ async fn run_modem_task(
     )
     .await;
 
-    info!("{}", logics::modem_snapshot_message(&modem_id, &snapshot));
+    info!(target: LOG_TARGET, "{}", logics::modem_snapshot_message(&modem_id, &snapshot));
     emit_event(
         &event_tx,
         DbusEvent::ModemSnapshot {
@@ -826,7 +845,7 @@ async fn emit_modem_update(
     modem_id: &logics::ModemId,
     update: logics::ModemUpdate,
 ) {
-    info!("{}", logics::modem_update_message(modem_id, &update));
+    info!(target: LOG_TARGET, "{}", logics::modem_update_message(modem_id, &update));
     emit_event(
         event_tx,
         DbusEvent::ModemUpdated {

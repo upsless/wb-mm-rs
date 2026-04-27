@@ -98,17 +98,30 @@ Planned async components:
 - Stage 0.2 now includes an explicit event/command exchange path:
   - DBus emits manager-level events into a tresher;
   - the tresher keeps small last-published state and translates DBus events
-    into MQTT commands;
-  - the MQTT side is still a stub, but it now receives structured commands and
-    logs their "execution" instead of logging only raw lifecycle.
+    into MQTT commands.
+- The MQTT side is no longer a stub:
+  - it connects to a real broker through `rumqttc`;
+  - it publishes retained WB device/control topics for the ModemManager device
+    and per-modem devices;
+  - it clears those retained topics on normal shutdown;
+  - it sets Last Will on the ModemManager availability control so unexpected
+    daemon death still makes the service unavailable in UI/control terms.
 - The current stage-0.2 manager-level DBus events are intentionally compact:
   `StatusChanged`, `Snapshot { version, modem_count }`, and
   `ModemCountChanged`.
+- Stage 0.2 also now includes typed per-modem events:
+  `ModemFound`, `ModemSnapshot`, `ModemUpdated`, and `ModemDeleted`.
+- MQTT-facing modem numbering now starts from `1` even if the DBus modem id is
+  `0`. The daemon keeps the DBus id internally and maps it to user-facing WB
+  device names such as `mm_modem_1`.
 - Current logging split for stage 0.2:
   - `info`: meaningful DBus-side ModemManager events and MQTT-side command
     execution results;
   - `debug`: tresher-internal event/command routing and lower-level
     lifecycle details.
+- Current log formatting uses explicit component targets, mirroring the python
+  project's style more closely:
+  `MAIN`, `DBUS`, `MQTT`, and `DISP`.
 
 ## Known Reference Findings
 
@@ -136,17 +149,17 @@ Planned async components:
    - review whether reconnect log wording should be aligned even more closely
      with `wb-mm-mqtt`;
    - keep local debug runner defaults for remote DBus access through
-     `unixexec:path=ssh,argv1=-T,argv2=root@wb.loc,argv3=systemd-stdio-bridge`.
+     `unixexec:path=ssh,argv1=-T,argv2=-q,argv3=root@wb.loc,argv4=systemd-stdio-bridge`.
 2. Build out stage 0.2 from manager-level exchange to richer mappings:
-   - add the next DBus event shapes needed for per-modem and SMS work;
-   - expand tresher command routing beyond the ModemManager manager device;
-   - keep the event/command types compact and reviewable, following the small
-     manager-level shape borrowed from the python reference.
+   - SMS events and fields are still not implemented;
+   - real MQTT publishing is in place, but topic/control semantics may still
+     need small alignment passes against WB UI expectations;
+   - keep the event/command types compact and reviewable as the DBus/MQTT
+     surface grows.
 3. Implement stage 1:
-   - MQTT + DBus + ModemManager device;
-   - version and modem count controls;
+   - build from the now-working MQTT + DBus + ModemManager device baseline;
    - correct MQTT updates on modem connect/disconnect;
-    - correct behavior when ModemManager service is stopped, started, or removed
+   - correct behavior when ModemManager service is stopped, started, or removed
      on `wb.loc`;
    - focused unit tests.
 

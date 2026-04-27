@@ -34,8 +34,9 @@ pub enum DbusEvent {
 
 /// Commands produced by the tresher and consumed by the MQTT side.
 ///
-/// MQTT is still a stub, so for now these commands only turn into structured
-/// logs. The shape is already close to what a real MQTT frontend will need.
+/// The MQTT frontend now executes these commands against a real broker, but
+/// the command set is still intentionally compact: only the currently modeled
+/// ModemManager and per-modem controls are covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttCommand {
     EnsureModemManagerDevice,

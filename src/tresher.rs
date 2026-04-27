@@ -7,6 +7,8 @@ use tracing::debug;
 use crate::dbus::{ModemId, ModemManagerStatus};
 use crate::exchange::{DbusEvent, MqttCommand};
 
+const LOG_TARGET: &str = "DISP";
+
 /// Minimal tresher that translates DBus events into MQTT commands.
 ///
 /// This stays deliberately stateful but small: we remember only the last
@@ -30,7 +32,7 @@ pub async fn run(
                     break;
                 };
 
-                debug!("Tresher received DBus event: {event:?}");
+                debug!(target: LOG_TARGET, "Received DBus event: {event:?}");
                 route_event(event, &mut state, &mqtt_command_tx).await?;
             }
         }
@@ -175,9 +177,9 @@ async fn send_command(
     mqtt_command_tx: &mpsc::Sender<MqttCommand>,
     command: MqttCommand,
 ) -> Result<()> {
-    debug!("Tresher queued MQTT command: {command:?}");
+    debug!(target: LOG_TARGET, "Queued MQTT command: {command:?}");
     if mqtt_command_tx.send(command).await.is_err() {
-        debug!("MQTT command channel closed while tresher was sending");
+        debug!(target: LOG_TARGET, "MQTT command channel closed while sending");
     }
 
     Ok(())

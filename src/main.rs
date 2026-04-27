@@ -24,6 +24,7 @@ const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 const MQTT_COMMAND_CHANNEL_CAPACITY: usize = 32;
+const LOG_TARGET: &str = "MAIN";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +32,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    info!("Starting wb-mm-mqtt");
+    info!(target: LOG_TARGET, "Starting wb-mm-mqtt");
 
     // `watch` is our simplest "global shutdown flag": one sender in `main`,
     // many receivers in background tasks. Each task can both read the current
@@ -44,7 +45,11 @@ async fn main() -> Result<()> {
         signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
-    let mut supervisor_task = tokio::spawn(run_supervisor(cli.dbus_address.clone(), shutdown_rx));
+    let mut supervisor_task = tokio::spawn(run_supervisor(
+        cli.dbus_address.clone(),
+        cli.mqtt_address.clone(),
+        shutdown_rx,
+    ));
 
     // `tokio::select!` waits for whichever async branch completes first.
     // In our case that is either:
@@ -52,13 +57,13 @@ async fn main() -> Result<()> {
     // - an unexpected supervisor exit.
     tokio::select! {
         _ = sigint.recv() => {
-            info!("SIGINT received");
-            info!("Termination requested");
+            info!(target: LOG_TARGET, "SIGINT received");
+            info!(target: LOG_TARGET, "Termination requested");
             let _ = shutdown_tx.send(true);
         }
         _ = sigterm.recv() => {
-            info!("SIGTERM received");
-            info!("Termination requested");
+            info!(target: LOG_TARGET, "SIGTERM received");
+            info!(target: LOG_TARGET, "Termination requested");
             let _ = shutdown_tx.send(true);
         }
         supervisor_result = &mut supervisor_task => {
@@ -70,7 +75,7 @@ async fn main() -> Result<()> {
 
     task_result("Supervisor", supervisor_task.await)?;
 
-    info!("wb-mm-mqtt stopped");
+    info!(target: LOG_TARGET, "wb-mm-mqtt stopped");
 
     Ok(())
 }
@@ -81,6 +86,7 @@ async fn main() -> Result<()> {
 /// - each subsystem reconnects with its own retry cadence.
 async fn run_supervisor(
     dbus_address: Option<String>,
+    mqtt_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut mqtt_retry_attempt = 1;
@@ -93,7 +99,11 @@ async fn run_supervisor(
         let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
         let (mqtt_command_tx, mqtt_command_rx) = mpsc::channel(MQTT_COMMAND_CHANNEL_CAPACITY);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
-        let mut mqtt_task = tokio::spawn(mqtt::run(mqtt_stop_rx.clone(), mqtt_command_rx));
+        let mut mqtt_task = tokio::spawn(mqtt::run(
+            mqtt_address.clone(),
+            mqtt_stop_rx.clone(),
+            mqtt_command_rx,
+        ));
         let tresher_task = tokio::spawn(tresher::run(mqtt_stop_rx, dbus_event_rx, mqtt_command_tx));
 
         match run_dbus_lifecycle(
@@ -119,6 +129,7 @@ async fn run_supervisor(
                     MQTT_RECONNECT_FAST_ATTEMPTS,
                 );
                 info!(
+                    target: LOG_TARGET,
                     "MQTT connection lost, retrying in {} second(s) (attempt {}).",
                     delay.as_secs(),
                     mqtt_retry_attempt
@@ -164,14 +175,14 @@ async fn run_dbus_lifecycle(
             }
             mqtt_result = &mut *mqtt_task => {
                 log_unexpected_task_exit("MQTT", mqtt_result)?;
-                info!("Stopping DBus because MQTT connection is unavailable.");
+                info!(target: LOG_TARGET, "Stopping DBus because MQTT connection is unavailable.");
                 let _ = dbus_stop_tx.send(true);
                 stop_finished_or_stopping_task("DBus", dbus_task).await?;
                 return Ok(SupervisorExit::MqttEnded);
             }
             dbus_result = &mut dbus_task => {
                 log_unexpected_task_exit("DBus", dbus_result)?;
-                debug!("{}", dbus::modemmanager_not_found_message());
+                debug!(target: LOG_TARGET, "{}", dbus::modemmanager_not_found_message());
                 if dbus_event_tx
                     .send(exchange::DbusEvent::StatusChanged(
                         dbus::ModemManagerStatus::NotFound,
@@ -179,7 +190,7 @@ async fn run_dbus_lifecycle(
                     .await
                     .is_err()
                 {
-                    debug!("DBus event channel closed while reporting NotFound");
+                    debug!(target: LOG_TARGET, "DBus event channel closed while reporting NotFound");
                 }
 
                 let delay = reconnect_delay(
@@ -189,6 +200,7 @@ async fn run_dbus_lifecycle(
                     DBUS_RECONNECT_FAST_ATTEMPTS,
                 );
                 info!(
+                    target: LOG_TARGET,
                     "DBus connection lost, retrying in {} second(s) (attempt {}).",
                     delay.as_secs(),
                     dbus_retry_attempt
@@ -236,8 +248,8 @@ fn log_unexpected_task_exit(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> Result<()> {
     match result {
-        Ok(Ok(())) => error!("{name} loop exited before shutdown."),
-        Ok(Err(err)) => error!("{name} loop failed: {err:#}"),
+        Ok(Ok(())) => error!(target: LOG_TARGET, "{name} loop exited before shutdown."),
+        Ok(Err(err)) => error!(target: LOG_TARGET, "{name} loop failed: {err:#}"),
         Err(join_error) => {
             return Err(anyhow::anyhow!("{name} task join failed: {join_error}"));
         }
@@ -262,7 +274,7 @@ async fn stop_finished_or_stopping_task(
     match task.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => {
-            error!("{name} loop ended while stopping: {err:#}");
+            error!(target: LOG_TARGET, "{name} loop ended while stopping: {err:#}");
             Ok(())
         }
         Err(join_error) => Err(anyhow::anyhow!("{name} task join failed: {join_error}")),
@@ -319,7 +331,7 @@ fn init_logging() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
+        .with_target(true)
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize logging: {error}"))?;
 
