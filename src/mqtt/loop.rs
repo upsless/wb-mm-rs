@@ -11,7 +11,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::dbus::{
-    self, ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
+    self, ManagerUpdate, ModemId, ModemManagerStatus, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
 };
 use crate::exchange::{MqttCommand, MqttEvent};
 use crate::mqtt::logics::{self, ControlSpec};
@@ -44,6 +44,7 @@ pub async fn run(
         eventloop,
         incoming_publish_tx,
     ));
+    frontend.ensure_main_device().await?;
 
     loop {
         tokio::select! {
@@ -109,38 +110,17 @@ impl MqttFrontend {
         mqtt_event_tx: &mpsc::Sender<MqttEvent>,
     ) -> Result<()> {
         match command {
-            MqttCommand::EnsureModemManagerDevice => {
-                self.ensure_manager_device().await?;
-                info!(target: LOG_TARGET, "{}", logics::mqtt_ensure_mm_device_message());
-            }
-            MqttCommand::PublishModemManagerStatus(status) => {
-                self.ensure_manager_device().await?;
-                self.publish_text_control(
-                    logics::MM_DEVICE_NAME,
-                    logics::MM_CONTROL_IS_AVAILABLE,
-                    switch_payload(modemmanager_is_available(status)),
-                )
-                .await?;
-                info!(
-                    target: LOG_TARGET,
-                    "{}",
-                    logics::mqtt_publish_mm_availability_message(switch_payload(
-                        modemmanager_is_available(status)
-                    ))
-                );
-            }
-            MqttCommand::PublishModemManagerVersion(version) => {
-                self.ensure_manager_device().await?;
+            MqttCommand::ManagerFound {
+                version,
+                modem_count,
+            } => {
+                self.ensure_main_device().await?;
                 self.publish_text_control(
                     logics::MM_DEVICE_NAME,
                     logics::MM_CONTROL_VERSION,
                     &version,
                 )
                 .await?;
-                info!(target: LOG_TARGET, "{}", logics::mqtt_publish_mm_version_message(&version));
-            }
-            MqttCommand::PublishModemManagerModemCount(modem_count) => {
-                self.ensure_manager_device().await?;
                 self.publish_number_control(
                     logics::MM_DEVICE_NAME,
                     logics::MM_CONTROL_MODEM_COUNT,
@@ -149,32 +129,119 @@ impl MqttFrontend {
                 .await?;
                 info!(
                     target: LOG_TARGET,
-                    "{}",
-                    logics::mqtt_publish_mm_modem_count_message(modem_count)
+                    "Update main device manager data: version={version} modem_count={modem_count}"
                 );
             }
-            MqttCommand::EnsureModemDevice { modem_id } => {
-                let modem_index = self.ensure_modem_device(&modem_id).await?;
+            MqttCommand::ManagerUpdated(update) => {
+                self.ensure_main_device().await?;
+                match update {
+                    ManagerUpdate::Status(status) => {
+                        let is_available = switch_payload(modemmanager_is_available(status));
+                        self.publish_text_control(
+                            logics::MM_DEVICE_NAME,
+                            logics::MM_CONTROL_IS_AVAILABLE,
+                            is_available,
+                        )
+                        .await?;
+                        self.publish_text_control(
+                            logics::MM_DEVICE_NAME,
+                            logics::MM_CONTROL_MANAGER_STATUS,
+                            manager_status_payload(Some(status)),
+                        )
+                        .await?;
+                        info!(
+                            target: LOG_TARGET,
+                            "{}",
+                            logics::mqtt_publish_mm_availability_message(is_available)
+                        );
+                        info!(
+                            target: LOG_TARGET,
+                            "Update main device manager status: status={}",
+                            manager_status_payload(Some(status))
+                        );
+                    }
+                    ManagerUpdate::Version(version) => {
+                        self.publish_text_control(
+                            logics::MM_DEVICE_NAME,
+                            logics::MM_CONTROL_VERSION,
+                            &version,
+                        )
+                        .await?;
+                        info!(
+                            target: LOG_TARGET,
+                            "{}",
+                            logics::mqtt_publish_mm_version_message(&version)
+                        );
+                    }
+                    ManagerUpdate::ModemCount(modem_count) => {
+                        self.publish_number_control(
+                            logics::MM_DEVICE_NAME,
+                            logics::MM_CONTROL_MODEM_COUNT,
+                            modem_count,
+                        )
+                        .await?;
+                        info!(
+                            target: LOG_TARGET,
+                            "{}",
+                            logics::mqtt_publish_mm_modem_count_message(modem_count)
+                        );
+                    }
+                }
+            }
+            MqttCommand::ManagerDeleted => {
+                self.ensure_main_device().await?;
+                let is_available = switch_payload(false);
+                self.publish_text_control(
+                    logics::MM_DEVICE_NAME,
+                    logics::MM_CONTROL_IS_AVAILABLE,
+                    is_available,
+                )
+                .await?;
+                self.publish_text_control(
+                    logics::MM_DEVICE_NAME,
+                    logics::MM_CONTROL_MANAGER_STATUS,
+                    manager_status_payload(None),
+                )
+                .await?;
                 info!(
                     target: LOG_TARGET,
                     "{}",
-                    logics::mqtt_ensure_modem_device_message(modem_index, &modem_id.0)
+                    logics::mqtt_publish_mm_availability_message(is_available)
                 );
+                info!(target: LOG_TARGET, "Update main device manager status: status={}", manager_status_payload(None));
             }
-            MqttCommand::PublishModemSnapshot { modem_id, snapshot } => {
+            MqttCommand::ModemFound {
+                modem_id,
+                is_active,
+                model,
+                revision,
+                state,
+                primary_sim_slot,
+                operator_name,
+                signal_quality,
+            } => {
+                let found = MqttModemFoundPayload {
+                    is_active,
+                    model,
+                    revision,
+                    state,
+                    primary_sim_slot,
+                    operator_name,
+                    signal_quality,
+                };
                 let modem_index = self.ensure_modem_device(&modem_id).await?;
-                self.publish_modem_snapshot(modem_index, &snapshot).await?;
+                self.publish_modem_found(modem_index, &found).await?;
                 info!(
                     target: LOG_TARGET,
                     "{}",
                     logics::mqtt_publish_modem_snapshot_message(
                         modem_index,
                         &modem_id.0,
-                        &snapshot.summary(),
+                        &found.summary(),
                     )
                 );
             }
-            MqttCommand::PublishModemUpdate { modem_id, update } => {
+            MqttCommand::ModemUpdated { modem_id, update } => {
                 let modem_index = self.ensure_modem_device(&modem_id).await?;
                 self.publish_modem_update(modem_index, &update).await?;
                 info!(
@@ -190,12 +257,12 @@ impl MqttFrontend {
             MqttCommand::PublishSmsInventorySnapshot {
                 modem_id,
                 sms_ids,
-                last_sms_timestamp,
+                initial_sms_snapshot,
             } => {
                 self.apply_sms_inventory_snapshot(
                     modem_id,
                     sms_ids,
-                    last_sms_timestamp,
+                    initial_sms_snapshot,
                     mqtt_event_tx,
                 )
                 .await?;
@@ -222,10 +289,10 @@ impl MqttFrontend {
                 self.apply_sms_deleted(modem_id, sms_id, mqtt_event_tx)
                     .await?;
             }
-            MqttCommand::DeleteModemDevice { modem_id } => {
+            MqttCommand::ModemDeleted { modem_id } => {
                 if let Some(modem_index) = self.state.remove_modem_index(&modem_id) {
                     self.cleanup_modem_device(modem_index).await?;
-                    self.sync_manager_sms_state().await?;
+                    self.sync_main_sms_state().await?;
                     info!(
                         target: LOG_TARGET,
                         "{}",
@@ -285,8 +352,8 @@ impl MqttFrontend {
         Ok(())
     }
 
-    async fn ensure_manager_device(&mut self) -> Result<()> {
-        if self.state.manager_device_created {
+    async fn ensure_main_device(&mut self) -> Result<()> {
+        if self.state.main_device_created {
             return Ok(());
         }
 
@@ -303,18 +370,20 @@ impl MqttFrontend {
 
         self.publish_text_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_IS_AVAILABLE, "0")
             .await?;
+        self.publish_text_control(
+            logics::MM_DEVICE_NAME,
+            logics::MM_CONTROL_MANAGER_STATUS,
+            manager_status_payload(None),
+        )
+        .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_VERSION)
             .await?;
         self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_MODEM_COUNT)
             .await?;
         self.publish_number_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_SMS_COUNT, 0)
             .await?;
-        self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_LAST_SMS)
-            .await?;
-        self.publish_null_control(logics::MM_DEVICE_NAME, logics::MM_CONTROL_LAST_SMS_UNIXTIME)
-            .await?;
 
-        self.state.manager_device_created = true;
+        self.state.main_device_created = true;
         Ok(())
     }
 
@@ -365,11 +434,11 @@ impl MqttFrontend {
             self.publish_control_metadata(&device_name, spec).await?;
         }
 
+        self.publish_null_control(&device_name, logics::MODEM_CONTROL_DISPLAYED_SMS_INDEX)
+            .await?;
+        self.publish_null_control(&device_name, logics::MODEM_CONTROL_LAST_SMS_DBUS_ID)
+            .await?;
         self.publish_number_control(&device_name, logics::MODEM_CONTROL_SMS_COUNT, 0)
-            .await?;
-        self.publish_null_control(&device_name, logics::MODEM_CONTROL_LAST_SMS)
-            .await?;
-        self.publish_null_control(&device_name, logics::MODEM_CONTROL_LAST_SMS_UNIXTIME)
             .await?;
         self.publish_message_select_control(modem_index, None, 1, false)
             .await?;
@@ -398,53 +467,53 @@ impl MqttFrontend {
         Ok(())
     }
 
-    async fn publish_modem_snapshot(
+    async fn publish_modem_found(
         &self,
         modem_index: u32,
-        snapshot: &ModemSnapshot,
+        found: &MqttModemFoundPayload,
     ) -> Result<()> {
         let device_name = logics::device_name_for_modem(modem_index);
 
         self.publish_text_control(
             &device_name,
             logics::MODEM_CONTROL_IS_ACTIVE,
-            switch_payload(snapshot.is_active),
+            switch_payload(found.is_active),
         )
         .await?;
         self.publish_optional_text_control(
             &device_name,
             logics::MODEM_CONTROL_MODEL,
-            snapshot.model.as_deref(),
+            found.model.as_deref(),
         )
         .await?;
         self.publish_optional_text_control(
             &device_name,
             logics::MODEM_CONTROL_REVISION,
-            snapshot.revision.as_deref(),
+            found.revision.as_deref(),
         )
         .await?;
         self.publish_optional_text_control(
             &device_name,
             logics::MODEM_CONTROL_STATE,
-            snapshot.state.as_deref(),
+            found.state.as_deref(),
         )
         .await?;
         self.publish_optional_number_control(
             &device_name,
             logics::MODEM_CONTROL_PRIMARY_SIM_SLOT,
-            snapshot.primary_sim_slot,
+            found.primary_sim_slot,
         )
         .await?;
         self.publish_optional_text_control(
             &device_name,
             logics::MODEM_CONTROL_OPERATOR_NAME,
-            snapshot.operator_name.as_deref(),
+            found.operator_name.as_deref(),
         )
         .await?;
         self.publish_optional_number_control(
             &device_name,
             logics::MODEM_CONTROL_SIGNAL_QUALITY,
-            snapshot.signal_quality,
+            found.signal_quality,
         )
         .await?;
 
@@ -512,20 +581,37 @@ impl MqttFrontend {
         &mut self,
         modem_id: ModemId,
         sms_ids: Vec<SmsId>,
-        last_sms_timestamp: Option<OffsetDateTime>,
+        initial_sms_snapshot: Option<SmsSnapshot>,
         mqtt_event_tx: &mpsc::Sender<MqttEvent>,
     ) -> Result<()> {
         self.ensure_modem_device(&modem_id).await?;
 
-        let request_sms_id = {
+        let (request_sms_id, initial_snapshot_to_apply) = {
             let modem_sms = self.state.modem_sms.entry(modem_id.clone()).or_default();
-            let request_sms_id = apply_sms_order(modem_sms, sms_ids);
-            modem_sms.last_sms_timestamp = last_sms_timestamp;
-            request_sms_id
+            let _ = apply_sms_order(modem_sms, sms_ids);
+            match (
+                modem_sms.picked_sms_id.clone(),
+                initial_sms_snapshot.as_ref(),
+            ) {
+                (Some(picked_sms_id), Some(snapshot)) if snapshot.sms_id == picked_sms_id => {
+                    (None, Some(snapshot.clone()))
+                }
+                (Some(picked_sms_id), _) => (Some(picked_sms_id), None),
+                (None, _) => (None, None),
+            }
         };
 
-        self.sync_modem_sms_state(&modem_id).await?;
-        self.sync_manager_sms_state().await?;
+        if let Some(snapshot) = initial_snapshot_to_apply {
+            let sms_id = snapshot.sms_id.clone();
+            self.apply_sms_snapshot(modem_id.clone(), sms_id, snapshot)
+                .await?;
+        } else {
+            self.sync_modem_sms_state(&modem_id).await?;
+            if request_sms_id.is_some() {
+                self.set_delete_message_writable(&modem_id, false).await?;
+            }
+        }
+        self.sync_main_sms_state().await?;
         if let Some(sms_id) = request_sms_id {
             request_sms_snapshot(mqtt_event_tx, modem_id, sms_id).await;
         }
@@ -543,23 +629,14 @@ impl MqttFrontend {
             let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
                 return Ok(());
             };
-            let previous_order = modem_sms.sms_order.clone();
-            let previous_last_sms_timestamp = modem_sms.last_sms_timestamp;
-            let new_last_sms_id = sms_ids.last().cloned();
-            let last_sms_is_new = new_last_sms_id
-                .as_ref()
-                .is_some_and(|sms_id| !previous_order.contains(sms_id));
-
-            let request_sms_id = apply_sms_order(modem_sms, sms_ids);
-            refresh_modem_last_sms_from_cache(modem_sms);
-            if modem_sms.last_sms_timestamp.is_none() && last_sms_is_new {
-                modem_sms.last_sms_timestamp = previous_last_sms_timestamp;
-            }
-            request_sms_id
+            apply_sms_order(modem_sms, sms_ids)
         };
 
         self.sync_modem_sms_state(&modem_id).await?;
-        self.sync_manager_sms_state().await?;
+        if request_sms_id.is_some() {
+            self.set_delete_message_writable(&modem_id, false).await?;
+        }
+        self.sync_main_sms_state().await?;
         if let Some(sms_id) = request_sms_id {
             request_sms_snapshot(mqtt_event_tx, modem_id, sms_id).await;
         }
@@ -576,19 +653,16 @@ impl MqttFrontend {
         let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
             return Ok(());
         };
-        if !modem_sms.sms_order.contains(&sms_id) {
+        if !modem_sms.sms_order.contains(&sms_id)
+            || modem_sms.picked_sms_id.as_ref() != Some(&sms_id)
+        {
             return Ok(());
         }
 
-        modem_sms
-            .sms_snapshots
-            .insert(sms_id.clone(), snapshot.clone());
-        if modem_sms.sms_order.last() == Some(&sms_id) {
-            modem_sms.last_sms_timestamp = snapshot.timestamp;
-        }
+        modem_sms.displayed_sms_snapshot = Some(snapshot);
 
         self.sync_modem_sms_state(&modem_id).await?;
-        self.sync_manager_sms_state().await
+        self.set_delete_message_writable(&modem_id, true).await
     }
 
     async fn apply_sms_update(
@@ -600,28 +674,20 @@ impl MqttFrontend {
         let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
             return Ok(());
         };
-        if !modem_sms.sms_order.contains(&sms_id) {
+        if modem_sms.picked_sms_id.as_ref() != Some(&sms_id) {
             return Ok(());
         }
 
-        match modem_sms.sms_snapshots.get_mut(&sms_id) {
-            Some(snapshot) => apply_sms_update_to_snapshot(snapshot, update),
-            None => {
-                if let SmsUpdate::Timestamp(timestamp) = update
-                    && modem_sms.sms_order.last() == Some(&sms_id)
-                {
-                    modem_sms.last_sms_timestamp = timestamp;
-                }
-            }
-        }
-        if let Some(snapshot) = modem_sms.sms_snapshots.get(&sms_id)
-            && modem_sms.sms_order.last() == Some(&sms_id)
-        {
-            modem_sms.last_sms_timestamp = snapshot.timestamp;
+        let Some(snapshot) = modem_sms.displayed_sms_snapshot.as_mut() else {
+            return Ok(());
+        };
+        if snapshot.sms_id != sms_id {
+            return Ok(());
         }
 
-        self.sync_modem_sms_state(&modem_id).await?;
-        self.sync_manager_sms_state().await
+        apply_sms_update_to_snapshot(snapshot, update);
+
+        self.sync_modem_sms_state(&modem_id).await
     }
 
     async fn apply_sms_deleted(
@@ -634,7 +700,6 @@ impl MqttFrontend {
             let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
                 return Ok(());
             };
-            modem_sms.sms_snapshots.remove(&sms_id);
             if !modem_sms.sms_order.contains(&sms_id) {
                 None
             } else {
@@ -644,14 +709,15 @@ impl MqttFrontend {
                     .filter(|current_sms_id| *current_sms_id != &sms_id)
                     .cloned()
                     .collect();
-                let request_sms_id = apply_sms_order(modem_sms, sms_ids);
-                refresh_modem_last_sms_from_cache(modem_sms);
-                request_sms_id
+                apply_sms_order(modem_sms, sms_ids)
             }
         };
 
         self.sync_modem_sms_state(&modem_id).await?;
-        self.sync_manager_sms_state().await?;
+        if request_sms_id.is_some() {
+            self.set_delete_message_writable(&modem_id, false).await?;
+        }
+        self.sync_main_sms_state().await?;
         if let Some(sms_id) = request_sms_id {
             request_sms_snapshot(mqtt_event_tx, modem_id, sms_id).await;
         }
@@ -671,6 +737,9 @@ impl MqttFrontend {
                 .get_mut(&modem_id)
                 .and_then(|modem_sms| {
                     let sms_id = modem_sms.sms_order.get(picked_index as usize).cloned()?;
+                    if modem_sms.picked_sms_id.as_ref() == Some(&sms_id) {
+                        return None;
+                    }
                     modem_sms.picked_sms_id = Some(sms_id.clone());
                     Some(sms_id)
                 })
@@ -679,6 +748,9 @@ impl MqttFrontend {
         };
 
         self.sync_modem_sms_state(&modem_id).await?;
+        if request_sms_id.is_some() {
+            self.set_delete_message_writable(&modem_id, false).await?;
+        }
         if let Some(sms_id) = request_sms_id {
             request_sms_snapshot(mqtt_event_tx, modem_id, sms_id).await;
         }
@@ -690,16 +762,18 @@ impl MqttFrontend {
         modem_id: ModemId,
         mqtt_event_tx: &mpsc::Sender<MqttEvent>,
     ) -> Result<()> {
-        let Some(sms_id) = self.state.modem_sms.get(&modem_id).and_then(|modem_sms| {
-            let sms_id = modem_sms.picked_sms_id.as_ref()?;
-            modem_sms
-                .sms_snapshots
-                .contains_key(sms_id)
-                .then_some(sms_id.clone())
-        }) else {
+        let Some(sms_id) = self
+            .state
+            .modem_sms
+            .get_mut(&modem_id)
+            .and_then(|modem_sms| modem_sms.displayed_sms_snapshot.as_ref())
+            .map(|snapshot| snapshot.sms_id.clone())
+        else {
             return Ok(());
         };
 
+        self.sync_modem_sms_state(&modem_id).await?;
+        self.set_delete_message_writable(&modem_id, false).await?;
         send_mqtt_event(mqtt_event_tx, MqttEvent::DeleteSms { modem_id, sms_id }).await;
         Ok(())
     }
@@ -710,8 +784,27 @@ impl MqttFrontend {
         let Some(publish_state) = self.collect_modem_sms_publish_state(modem_id) else {
             return Ok(());
         };
+        let selected_index = self
+            .state
+            .modem_sms
+            .get(modem_id)
+            .and_then(displayed_sms_index);
 
         let device_name = logics::device_name_for_modem(modem_index);
+
+        if self
+            .state
+            .modem_sms
+            .get(modem_id)
+            .is_none_or(|modem_sms| modem_sms.last_selected_index != Some(selected_index))
+        {
+            self.publish_optional_number_control(
+                &device_name,
+                logics::MODEM_CONTROL_DISPLAYED_SMS_INDEX,
+                selected_index,
+            )
+            .await?;
+        }
 
         if self
             .state
@@ -740,57 +833,29 @@ impl MqttFrontend {
         }
 
         if self.state.modem_sms.get(modem_id).is_none_or(|modem_sms| {
-            modem_sms.last_published_last_sms != Some(publish_state.last_sms_timestamp)
+            modem_sms.last_published_last_sms_id != Some(publish_state.last_sms_id.clone())
         }) {
-            self.publish_optional_timestamp_controls(
+            self.publish_optional_text_control(
                 &device_name,
-                logics::MODEM_CONTROL_LAST_SMS,
-                logics::MODEM_CONTROL_LAST_SMS_UNIXTIME,
-                publish_state.last_sms_timestamp,
+                logics::MODEM_CONTROL_LAST_SMS_DBUS_ID,
+                publish_state
+                    .last_sms_id
+                    .as_ref()
+                    .map(|sms_id| sms_id.0.as_str()),
             )
             .await?;
             if let Some(modem_sms) = self.state.modem_sms.get_mut(modem_id) {
-                modem_sms.last_published_last_sms = Some(publish_state.last_sms_timestamp);
+                modem_sms.last_published_last_sms_id = Some(publish_state.last_sms_id.clone());
             }
         }
 
         if self.state.modem_sms.get(modem_id).is_none_or(|modem_sms| {
-            modem_sms.last_picked_index != Some(publish_state.picked_index)
-                || modem_sms.last_picked_max_index != Some(publish_state.max_index)
-                || modem_sms.last_picked_writable != Some(publish_state.message_writable)
+            modem_sms.last_selected_snapshot != Some(publish_state.selected_snapshot.clone())
         }) {
-            self.publish_message_select_control(
-                modem_index,
-                publish_state.picked_index,
-                publish_state.max_index,
-                publish_state.message_writable,
-            )
-            .await?;
-            if let Some(modem_sms) = self.state.modem_sms.get_mut(modem_id) {
-                modem_sms.last_picked_index = Some(publish_state.picked_index);
-                modem_sms.last_picked_max_index = Some(publish_state.max_index);
-                modem_sms.last_picked_writable = Some(publish_state.message_writable);
-            }
-            info!(
-                target: LOG_TARGET,
-                "{}",
-                logics::mqtt_publish_message_select_control_message(
-                    modem_index,
-                    &modem_id.0,
-                    publish_state.picked_index,
-                    publish_state.max_index,
-                    publish_state.message_writable,
-                )
-            );
-        }
-
-        if self.state.modem_sms.get(modem_id).is_none_or(|modem_sms| {
-            modem_sms.last_picked_snapshot != Some(publish_state.picked_snapshot.clone())
-        }) {
-            self.publish_picked_sms(modem_index, publish_state.picked_snapshot.as_ref())
+            self.publish_picked_sms(modem_index, publish_state.selected_snapshot.as_ref())
                 .await?;
             if let Some(modem_sms) = self.state.modem_sms.get_mut(modem_id) {
-                modem_sms.last_picked_snapshot = Some(publish_state.picked_snapshot.clone());
+                modem_sms.last_selected_snapshot = Some(publish_state.selected_snapshot.clone());
             }
             info!(
                 target: LOG_TARGET,
@@ -799,7 +864,7 @@ impl MqttFrontend {
                     modem_index,
                     &modem_id.0,
                     publish_state
-                        .picked_snapshot
+                        .selected_snapshot
                         .as_ref()
                         .map(SmsSnapshot::summary)
                         .as_deref(),
@@ -808,13 +873,33 @@ impl MqttFrontend {
         }
 
         if self.state.modem_sms.get(modem_id).is_none_or(|modem_sms| {
-            modem_sms.last_delete_writable != Some(publish_state.delete_writable)
+            modem_sms.last_selected_index != Some(selected_index)
+                || modem_sms.last_selected_max_index != Some(publish_state.max_index)
+                || modem_sms.last_selected_writable != Some(publish_state.message_writable)
         }) {
-            self.publish_delete_message_control(modem_index, publish_state.delete_writable)
-                .await?;
+            self.publish_message_select_control(
+                modem_index,
+                selected_index,
+                publish_state.max_index,
+                publish_state.message_writable,
+            )
+            .await?;
             if let Some(modem_sms) = self.state.modem_sms.get_mut(modem_id) {
-                modem_sms.last_delete_writable = Some(publish_state.delete_writable);
+                modem_sms.last_selected_index = Some(selected_index);
+                modem_sms.last_selected_max_index = Some(publish_state.max_index);
+                modem_sms.last_selected_writable = Some(publish_state.message_writable);
             }
+            info!(
+                target: LOG_TARGET,
+                "{}",
+                logics::mqtt_publish_message_select_control_message(
+                    modem_index,
+                    &modem_id.0,
+                    selected_index,
+                    publish_state.max_index,
+                    publish_state.message_writable,
+                )
+            );
         }
 
         Ok(())
@@ -826,48 +911,27 @@ impl MqttFrontend {
     ) -> Option<MqttModemSmsPublishState> {
         let modem_sms = self.state.modem_sms.get(modem_id)?;
         let sms_count = modem_sms.sms_order.len();
-        let max_index = max_sms_index(sms_count);
-        let picked_index = modem_sms
-            .picked_sms_id
-            .as_ref()
-            .and_then(|picked_sms_id| {
-                modem_sms
-                    .sms_order
-                    .iter()
-                    .position(|sms_id| sms_id == picked_sms_id)
-            })
-            .and_then(|index| u32::try_from(index + 1).ok());
-        let picked_snapshot = modem_sms
-            .picked_sms_id
-            .as_ref()
-            .and_then(|sms_id| modem_sms.sms_snapshots.get(sms_id))
-            .cloned();
+        let selected_index = displayed_sms_index(modem_sms);
+        let max_index = published_sms_index_max(sms_count, selected_index);
+        let selected_snapshot = modem_sms.displayed_sms_snapshot.clone();
 
         Some(MqttModemSmsPublishState {
             sms_count,
-            last_sms_timestamp: modem_sms.last_sms_timestamp,
-            picked_index,
+            last_sms_id: modem_sms.sms_order.last().cloned(),
             max_index,
             message_writable: sms_count > 0,
-            delete_writable: picked_snapshot.is_some(),
-            picked_snapshot,
+            selected_snapshot,
         })
     }
 
-    async fn sync_manager_sms_state(&mut self) -> Result<()> {
-        self.ensure_manager_device().await?;
+    async fn sync_main_sms_state(&mut self) -> Result<()> {
+        self.ensure_main_device().await?;
         let sms_count = self
             .state
             .modem_sms
             .values()
             .map(|modem_sms| modem_sms.sms_order.len())
             .sum::<usize>();
-        let last_sms = self
-            .state
-            .modem_sms
-            .values()
-            .filter_map(|modem_sms| modem_sms.last_sms_timestamp)
-            .max();
 
         if self.state.last_manager_sms_count != Some(sms_count) {
             self.publish_number_control(
@@ -881,22 +945,6 @@ impl MqttFrontend {
                 target: LOG_TARGET,
                 "{}",
                 logics::mqtt_publish_mm_sms_count_message(sms_count)
-            );
-        }
-
-        if self.state.last_manager_last_sms != Some(last_sms) {
-            self.publish_optional_timestamp_controls(
-                logics::MM_DEVICE_NAME,
-                logics::MM_CONTROL_LAST_SMS,
-                logics::MM_CONTROL_LAST_SMS_UNIXTIME,
-                last_sms,
-            )
-            .await?;
-            self.state.last_manager_last_sms = Some(last_sms);
-            info!(
-                target: LOG_TARGET,
-                "{}",
-                logics::mqtt_publish_mm_last_sms_message(last_sms)
             );
         }
 
@@ -940,6 +988,17 @@ impl MqttFrontend {
             .await
     }
 
+    async fn set_delete_message_writable(
+        &mut self,
+        modem_id: &ModemId,
+        writable: bool,
+    ) -> Result<()> {
+        let modem_index = self.ensure_modem_device(modem_id).await?;
+        self.ensure_modem_sms_controls(modem_index).await?;
+        self.publish_delete_message_control(modem_index, writable)
+            .await
+    }
+
     async fn publish_picked_sms(
         &self,
         modem_index: u32,
@@ -949,6 +1008,12 @@ impl MqttFrontend {
 
         match snapshot {
             Some(snapshot) => {
+                self.publish_text_control(
+                    &device_name,
+                    logics::MODEM_CONTROL_SELECTED_SMS_DBUS_ID,
+                    &snapshot.sms_id.0,
+                )
+                .await?;
                 self.publish_optional_timestamp_controls(
                     &device_name,
                     logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
@@ -976,6 +1041,8 @@ impl MqttFrontend {
                 .await?;
             }
             None => {
+                self.publish_null_control(&device_name, logics::MODEM_CONTROL_SELECTED_SMS_DBUS_ID)
+                    .await?;
                 self.publish_null_control(
                     &device_name,
                     logics::MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
@@ -1014,15 +1081,15 @@ impl MqttFrontend {
             self.cleanup_modem_device(modem_index).await?;
         }
 
-        if self.state.manager_device_created {
-            self.cleanup_manager_device().await?;
+        if self.state.main_device_created {
+            self.cleanup_main_device().await?;
         }
 
         self.state = MqttSessionState::default();
         Ok(())
     }
 
-    async fn cleanup_manager_device(&self) -> Result<()> {
+    async fn cleanup_main_device(&self) -> Result<()> {
         self.cleanup_device(logics::MM_DEVICE_NAME, logics::manager_control_specs())
             .await
     }
@@ -1197,40 +1264,60 @@ impl MqttFrontend {
 
 #[derive(Debug, Default)]
 struct MqttSessionState {
-    manager_device_created: bool,
+    main_device_created: bool,
     modem_indices: HashMap<ModemId, u32>,
     reverse_modem_indices: HashMap<u32, ModemId>,
     modem_sms_controls_created: HashSet<u32>,
     subscribed_modem_sms_controls: HashSet<u32>,
     modem_sms: HashMap<ModemId, MqttModemSmsState>,
     last_manager_sms_count: Option<usize>,
-    last_manager_last_sms: Option<Option<OffsetDateTime>>,
 }
 
 #[derive(Debug, Default)]
 struct MqttModemSmsState {
     sms_order: Vec<SmsId>,
-    sms_snapshots: HashMap<SmsId, SmsSnapshot>,
     picked_sms_id: Option<SmsId>,
-    last_sms_timestamp: Option<OffsetDateTime>,
+    displayed_sms_snapshot: Option<SmsSnapshot>,
     last_sms_count: Option<usize>,
-    last_published_last_sms: Option<Option<OffsetDateTime>>,
-    last_picked_index: Option<Option<u32>>,
-    last_picked_max_index: Option<u32>,
-    last_picked_writable: Option<bool>,
-    last_delete_writable: Option<bool>,
-    last_picked_snapshot: Option<Option<SmsSnapshot>>,
+    last_published_last_sms_id: Option<Option<SmsId>>,
+    last_selected_index: Option<Option<u32>>,
+    last_selected_max_index: Option<u32>,
+    last_selected_writable: Option<bool>,
+    last_selected_snapshot: Option<Option<SmsSnapshot>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MqttModemSmsPublishState {
     sms_count: usize,
-    last_sms_timestamp: Option<OffsetDateTime>,
-    picked_index: Option<u32>,
+    last_sms_id: Option<SmsId>,
     max_index: u32,
     message_writable: bool,
-    delete_writable: bool,
-    picked_snapshot: Option<SmsSnapshot>,
+    selected_snapshot: Option<SmsSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MqttModemFoundPayload {
+    is_active: bool,
+    model: Option<String>,
+    revision: Option<String>,
+    state: Option<String>,
+    primary_sim_slot: Option<u32>,
+    operator_name: Option<String>,
+    signal_quality: Option<u32>,
+}
+
+impl MqttModemFoundPayload {
+    fn summary(&self) -> String {
+        format_modem_found_summary(
+            self.is_active,
+            self.model.as_deref(),
+            self.revision.as_deref(),
+            self.state.as_deref(),
+            self.primary_sim_slot,
+            self.operator_name.as_deref(),
+            self.signal_quality,
+        )
+    }
 }
 
 impl MqttSessionState {
@@ -1394,6 +1481,39 @@ fn modemmanager_is_available(status: ModemManagerStatus) -> bool {
     matches!(status, ModemManagerStatus::Active)
 }
 
+fn manager_status_payload(status: Option<ModemManagerStatus>) -> &'static str {
+    match status {
+        Some(ModemManagerStatus::Active) => "active",
+        Some(ModemManagerStatus::Inactive) => "inactive",
+        None => "not_found_on_dbus",
+    }
+}
+
+fn format_modem_found_summary(
+    is_active: bool,
+    model: Option<&str>,
+    revision: Option<&str>,
+    state: Option<&str>,
+    primary_sim_slot: Option<u32>,
+    operator_name: Option<&str>,
+    signal_quality: Option<u32>,
+) -> String {
+    format!(
+        "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
+        is_active,
+        model.unwrap_or("None"),
+        revision.unwrap_or("None"),
+        state.unwrap_or("None"),
+        primary_sim_slot
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "None".to_string()),
+        operator_name.unwrap_or("None"),
+        signal_quality
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "None".to_string()),
+    )
+}
+
 fn switch_payload(value: bool) -> &'static str {
     if value { "1" } else { "0" }
 }
@@ -1441,10 +1561,6 @@ fn apply_sms_order(modem_sms: &mut MqttModemSmsState, sms_ids: Vec<SmsId>) -> Op
         .unwrap_or(0);
 
     modem_sms.sms_order = sms_ids;
-    let sms_id_set: HashSet<_> = modem_sms.sms_order.iter().cloned().collect();
-    modem_sms
-        .sms_snapshots
-        .retain(|sms_id, _| sms_id_set.contains(sms_id));
 
     let picked_sms_id = match old_picked_sms_id {
         Some(old_picked_sms_id) if modem_sms.sms_order.contains(&old_picked_sms_id) => {
@@ -1459,15 +1575,31 @@ fn apply_sms_order(modem_sms: &mut MqttModemSmsState, sms_ids: Vec<SmsId>) -> Op
 
     let changed = modem_sms.picked_sms_id != picked_sms_id;
     modem_sms.picked_sms_id = picked_sms_id.clone();
+    if modem_sms.picked_sms_id.is_none() {
+        modem_sms.displayed_sms_snapshot = None;
+    }
     changed.then_some(picked_sms_id).flatten()
 }
 
-fn refresh_modem_last_sms_from_cache(modem_sms: &mut MqttModemSmsState) {
-    modem_sms.last_sms_timestamp = modem_sms
+fn displayed_sms_index(modem_sms: &MqttModemSmsState) -> Option<u32> {
+    let displayed_sms_id = modem_sms
+        .displayed_sms_snapshot
+        .as_ref()
+        .map(|snapshot| &snapshot.sms_id)?;
+
+    modem_sms
         .sms_order
-        .last()
-        .and_then(|sms_id| modem_sms.sms_snapshots.get(sms_id))
-        .and_then(|snapshot| snapshot.timestamp);
+        .iter()
+        .position(|sms_id| sms_id == displayed_sms_id)
+        .and_then(|index| u32::try_from(index + 1).ok())
+        .or_else(|| modem_sms.last_selected_index.flatten())
+}
+
+fn published_sms_index_max(sms_count: usize, selected_index: Option<u32>) -> u32 {
+    let selected_index = selected_index
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    max_sms_index(sms_count.max(selected_index))
 }
 
 fn apply_sms_update_to_snapshot(snapshot: &mut SmsSnapshot, update: SmsUpdate) {
@@ -1486,10 +1618,10 @@ fn max_sms_index(sms_count: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MqttEndpoint, MqttModemSmsState, MqttSessionState, apply_sms_order,
+        MqttEndpoint, MqttModemSmsState, MqttSessionState, apply_sms_order, displayed_sms_index,
         parse_delete_picked_sms_topic, parse_message_select_topic, parse_mqtt_endpoint,
     };
-    use crate::dbus::{ModemId, SmsId};
+    use crate::dbus::{ModemId, SmsId, SmsSnapshot};
 
     #[test]
     fn parses_unix_endpoint() {
@@ -1594,10 +1726,46 @@ mod tests {
         assert_eq!(request_sms_id, None);
     }
 
+    #[test]
+    fn sms_order_clears_displayed_snapshot_when_selection_becomes_empty() {
+        let mut state = MqttModemSmsState {
+            sms_order: sms_ids(&["144"]),
+            picked_sms_id: Some(SmsId("144".to_string())),
+            displayed_sms_snapshot: Some(sms_snapshot("144")),
+            ..Default::default()
+        };
+
+        let _ = apply_sms_order(&mut state, Vec::new());
+
+        assert_eq!(state.displayed_sms_snapshot, None);
+    }
+
+    #[test]
+    fn displayed_sms_index_keeps_last_published_value_while_waiting_for_replacement() {
+        let state = MqttModemSmsState {
+            sms_order: sms_ids(&["200"]),
+            displayed_sms_snapshot: Some(sms_snapshot("145")),
+            last_selected_index: Some(Some(2)),
+            ..Default::default()
+        };
+
+        assert_eq!(displayed_sms_index(&state), Some(2));
+    }
+
     fn sms_ids(values: &[&str]) -> Vec<SmsId> {
         values
             .iter()
             .map(|value| SmsId((*value).to_string()))
             .collect()
+    }
+
+    fn sms_snapshot(value: &str) -> SmsSnapshot {
+        SmsSnapshot {
+            sms_id: SmsId(value.to_string()),
+            is_received: true,
+            timestamp: None,
+            number: None,
+            text: None,
+        }
     }
 }

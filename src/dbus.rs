@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::exchange::{DbusCommand, DbusEvent};
 
 pub use logics::{
-    ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
+    ManagerUpdate, ModemId, ModemManagerStatus, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
     format_timestamp_for_wb,
 };
 
@@ -22,5 +22,5 @@ pub async fn run(
 }
 
 pub fn modemmanager_not_found_message() -> &'static str {
-    logics::modemmanager_status_message(logics::ModemManagerStatus::NotFound)
+    logics::manager_deleted_message()
 }

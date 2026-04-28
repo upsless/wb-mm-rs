@@ -70,14 +70,6 @@ pub const MM_SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
 pub enum ModemManagerStatus {
     Active,
     Inactive,
-    NotFound,
-}
-
-/// Manager-level snapshot read after connecting to ModemManager.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModemManagerSnapshot {
-    pub version: String,
-    pub modem_count: usize,
 }
 
 /// Compact typed modem identifier derived from the DBus object path suffix.
@@ -88,30 +80,21 @@ pub struct ModemId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SmsId(pub String);
 
-/// Full modem snapshot read before subscribing to live modem changes.
+/// Single manager-property update emitted from live DBus observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModemSnapshot {
-    pub is_active: bool,
-    pub model: Option<String>,
-    pub revision: Option<String>,
-    pub state: Option<String>,
-    pub primary_sim_slot: Option<u32>,
-    pub operator_name: Option<String>,
-    pub signal_quality: Option<u32>,
+pub enum ManagerUpdate {
+    Status(ModemManagerStatus),
+    Version(String),
+    ModemCount(usize),
 }
 
-impl ModemSnapshot {
+impl ManagerUpdate {
     pub fn summary(&self) -> String {
-        format!(
-            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
-            self.is_active,
-            format_option_string(self.model.as_deref()),
-            format_option_string(self.revision.as_deref()),
-            format_option_string(self.state.as_deref()),
-            format_option_u32(self.primary_sim_slot),
-            format_option_string(self.operator_name.as_deref()),
-            format_option_u32(self.signal_quality),
-        )
+        match self {
+            ManagerUpdate::Status(value) => format!("status={}", modemmanager_status_name(*value)),
+            ManagerUpdate::Version(value) => format!("version={value}"),
+            ManagerUpdate::ModemCount(value) => format!("modem_count={value}"),
+        }
     }
 }
 
@@ -150,6 +133,7 @@ impl ModemUpdate {
 /// Full SMS snapshot for one incoming ModemManager SMS object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmsSnapshot {
+    pub sms_id: SmsId,
     pub is_received: bool,
     pub timestamp: Option<OffsetDateTime>,
     pub number: Option<String>,
@@ -159,7 +143,8 @@ pub struct SmsSnapshot {
 impl SmsSnapshot {
     pub fn summary(&self) -> String {
         format!(
-            "is_received={}, timestamp={}, sender={}, text={}",
+            "sms_id={}, is_received={}, timestamp={}, sender={}, text={}",
+            self.sms_id.0,
             self.is_received,
             format_option_timestamp(self.timestamp),
             format_option_string(self.number.as_deref()),
@@ -236,19 +221,26 @@ pub fn modemmanager_status_message(status: ModemManagerStatus) -> &'static str {
     match status {
         ModemManagerStatus::Active => "ModemManager found on DBus and Active",
         ModemManagerStatus::Inactive => "ModemManager found on DBus and Inactive",
-        ModemManagerStatus::NotFound => "ModemManager not found on DBus",
     }
 }
 
-pub fn modemmanager_snapshot_message(snapshot: &ModemManagerSnapshot) -> String {
-    format!(
-        "ModemManager data: version={}, modem_count={}",
-        snapshot.version, snapshot.modem_count
-    )
+pub fn modemmanager_status_name(status: ModemManagerStatus) -> &'static str {
+    match status {
+        ModemManagerStatus::Active => "active",
+        ModemManagerStatus::Inactive => "inactive",
+    }
 }
 
-pub fn modemmanager_modem_count_changed_message(modem_count: usize) -> String {
-    format!("ModemManager modem count changed: modem_count={modem_count}")
+pub fn manager_found_message(version: &str, modem_count: usize) -> String {
+    format!("ModemManager data: version={version}, modem_count={modem_count}")
+}
+
+pub fn manager_deleted_message() -> &'static str {
+    "ModemManager deleted from DBus"
+}
+
+pub fn manager_update_message(update: &ManagerUpdate) -> String {
+    format!("ModemManager changed: {}", update.summary())
 }
 
 pub fn modem_id_from_path(path: &str) -> Option<ModemId> {
@@ -298,40 +290,25 @@ pub fn modem_state_is_active(state: i32) -> bool {
     matches!(state, 6..=11)
 }
 
-pub fn modem_found_message(modem_id: &ModemId) -> String {
-    format!("Modem {} found on DBus", modem_id.0)
-}
-
 pub fn modem_deleted_message(modem_id: &ModemId) -> String {
     format!("Modem {} deleted from DBus", modem_id.0)
-}
-
-pub fn modem_snapshot_message(modem_id: &ModemId, snapshot: &ModemSnapshot) -> String {
-    format!("Modem {} data: {}", modem_id.0, snapshot.summary())
 }
 
 pub fn modem_update_message(modem_id: &ModemId, update: &ModemUpdate) -> String {
     format!("Modem {} changed: {}", modem_id.0, update.summary())
 }
 
-pub fn sms_snapshot_message(modem_id: &ModemId, sms_id: &SmsId, snapshot: &SmsSnapshot) -> String {
-    format!(
-        "Modem {} SMS {} data: {}",
-        modem_id.0,
-        sms_id.0,
-        snapshot.summary()
-    )
-}
-
 pub fn sms_inventory_snapshot_message(
     modem_id: &ModemId,
     sms_count: usize,
-    last_sms_timestamp: Option<OffsetDateTime>,
+    initial_sms_id: Option<&SmsId>,
 ) -> String {
     format!(
-        "Modem {} SMS inventory: sms_count={sms_count}, last_sms={}",
+        "Modem {} SMS inventory: sms_count={sms_count}, initial_sms={}",
         modem_id.0,
-        format_option_timestamp(last_sms_timestamp),
+        initial_sms_id
+            .map(|sms_id| sms_id.0.as_str())
+            .unwrap_or("None"),
     )
 }
 

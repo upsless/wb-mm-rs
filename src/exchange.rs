@@ -1,26 +1,23 @@
-use time::OffsetDateTime;
-
-use crate::dbus::{
-    ModemId, ModemManagerStatus, ModemSnapshot, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
-};
+use crate::dbus::{ManagerUpdate, ModemId, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate};
 
 /// Events emitted by the DBus loop and consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbusEvent {
-    StatusChanged(ModemManagerStatus),
-    Snapshot {
+    ManagerFound {
         version: String,
         modem_count: usize,
     },
-    ModemCountChanged {
-        modem_count: usize,
-    },
+    ManagerUpdated(ManagerUpdate),
+    ManagerDeleted,
     ModemFound {
         modem_id: ModemId,
-    },
-    ModemSnapshot {
-        modem_id: ModemId,
-        snapshot: ModemSnapshot,
+        is_active: bool,
+        model: Option<String>,
+        revision: Option<String>,
+        state: Option<String>,
+        primary_sim_slot: Option<u32>,
+        operator_name: Option<String>,
+        signal_quality: Option<u32>,
     },
     ModemUpdated {
         modem_id: ModemId,
@@ -50,32 +47,37 @@ pub enum DbusEvent {
     SmsInventorySnapshot {
         modem_id: ModemId,
         sms_ids: Vec<SmsId>,
-        last_sms_timestamp: Option<OffsetDateTime>,
+        initial_sms_snapshot: Option<SmsSnapshot>,
     },
 }
 
 /// Commands emitted by the dispatcher and executed by the MQTT loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttCommand {
-    EnsureModemManagerDevice,
-    PublishModemManagerStatus(ModemManagerStatus),
-    PublishModemManagerVersion(String),
-    PublishModemManagerModemCount(usize),
-    EnsureModemDevice {
-        modem_id: ModemId,
+    ManagerFound {
+        version: String,
+        modem_count: usize,
     },
-    PublishModemSnapshot {
+    ManagerUpdated(ManagerUpdate),
+    ManagerDeleted,
+    ModemFound {
         modem_id: ModemId,
-        snapshot: ModemSnapshot,
+        is_active: bool,
+        model: Option<String>,
+        revision: Option<String>,
+        state: Option<String>,
+        primary_sim_slot: Option<u32>,
+        operator_name: Option<String>,
+        signal_quality: Option<u32>,
     },
-    PublishModemUpdate {
+    ModemUpdated {
         modem_id: ModemId,
         update: ModemUpdate,
     },
     PublishSmsInventorySnapshot {
         modem_id: ModemId,
         sms_ids: Vec<SmsId>,
-        last_sms_timestamp: Option<OffsetDateTime>,
+        initial_sms_snapshot: Option<SmsSnapshot>,
     },
     PublishSmsList {
         modem_id: ModemId,
@@ -95,7 +97,7 @@ pub enum MqttCommand {
         modem_id: ModemId,
         sms_id: SmsId,
     },
-    DeleteModemDevice {
+    ModemDeleted {
         modem_id: ModemId,
     },
 }

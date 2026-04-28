@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use time::OffsetDateTime;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -23,12 +24,26 @@ const LOG_TARGET: &str = "DBUS";
 
 /// Streams and per-modem tasks that exist only while ModemManager is active.
 struct ActiveModemManagerState {
-    snapshot: logics::ModemManagerSnapshot,
+    version: String,
+    modem_count: usize,
     version_changes: PropertyStream<'static, String>,
     object_manager: ObjectManagerProxy<'static>,
     interfaces_added: InterfacesAddedStream,
     interfaces_removed: InterfacesRemovedStream,
     modem_tasks: HashMap<logics::ModemId, JoinHandle<()>>,
+}
+
+type SmsCommandRegistry = Arc<Mutex<HashMap<logics::ModemId, mpsc::Sender<ModemSmsCommand>>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModemSmsCommand {
+    TrackSms { sms_id: logics::SmsId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagerPresence {
+    Present(logics::ModemManagerStatus),
+    Deleted,
 }
 
 /// Connects to DBus, publishes the initial ModemManager state, and forwards
@@ -39,6 +54,7 @@ pub async fn run(
     mut command_rx: mpsc::Receiver<DbusCommand>,
     event_tx: mpsc::Sender<DbusEvent>,
 ) -> Result<()> {
+    let sms_command_registry = Arc::new(Mutex::new(HashMap::new()));
     // Connecting to a remote DBus bridge may block for a while, so we race the
     // connection attempt against shutdown. This lets the daemon exit cleanly
     // even if the bridge is slow or disappears mid-connect.
@@ -60,11 +76,11 @@ pub async fn run(
         .await
         .context("failed to create org.freedesktop.DBus proxy")?;
 
-    let mut mm_status = query_modemmanager_status(&dbus_proxy).await?;
-    info!(target: LOG_TARGET, "{}", logics::modemmanager_status_message(mm_status));
-    emit_event(&event_tx, DbusEvent::StatusChanged(mm_status)).await;
+    let mut manager_presence = query_manager_presence(&dbus_proxy).await?;
+    emit_manager_presence(&event_tx, manager_presence).await;
 
-    let mut mm_snapshot = None;
+    let mut mm_version = None;
+    let mut mm_modem_count = None;
     let mut mm_object_manager = None;
     let mut mm_version_changes = None;
     let mut mm_interfaces_added = None;
@@ -72,20 +88,21 @@ pub async fn run(
     let mut mm_modem_tasks = None;
     let mut mm_modem_count_known = false;
 
-    if mm_status == logics::ModemManagerStatus::Active {
-        let state = activate_modemmanager_state(&connection, &event_tx).await?;
-        install_active_state(
-            state,
-            &mut mm_snapshot,
-            &mut mm_object_manager,
-            &mut mm_version_changes,
-            &mut mm_interfaces_added,
-            &mut mm_interfaces_removed,
-            &mut mm_modem_tasks,
-        );
+    if manager_presence == ManagerPresence::Present(logics::ModemManagerStatus::Active) {
+        let state =
+            activate_modemmanager_state(&connection, &event_tx, sms_command_registry.clone())
+                .await?;
+        mm_version = Some(state.version);
+        mm_modem_count = Some(state.modem_count);
+        mm_object_manager = Some(state.object_manager);
+        mm_version_changes = Some(state.version_changes);
+        mm_interfaces_added = Some(state.interfaces_added);
+        mm_interfaces_removed = Some(state.interfaces_removed);
+        mm_modem_tasks = Some(state.modem_tasks);
         mm_modem_count_known = false;
         sync_modem_count(
-            mm_snapshot.as_mut(),
+            mm_version.as_deref(),
+            mm_modem_count.as_mut(),
             mm_object_manager.as_ref(),
             &mut mm_modem_count_known,
             &event_tx,
@@ -122,19 +139,15 @@ pub async fn run(
                     .args()
                     .context("failed to parse ModemManager NameOwnerChanged signal")?;
 
-                let new_status = query_modemmanager_status(&dbus_proxy).await?;
-                if new_status != mm_status {
-                    mm_status = new_status;
-                    info!(target: LOG_TARGET, "{}", logics::modemmanager_status_message(mm_status));
-                    emit_event(
-                        &event_tx,
-                        DbusEvent::StatusChanged(mm_status),
-                    )
-                    .await;
+                let new_presence = query_manager_presence(&dbus_proxy).await?;
+                if new_presence != manager_presence {
+                    manager_presence = new_presence;
+                    emit_manager_presence(&event_tx, manager_presence).await;
                 }
 
                 clear_active_state(
-                    &mut mm_snapshot,
+                    &mut mm_version,
+                    &mut mm_modem_count,
                     &mut mm_object_manager,
                     &mut mm_version_changes,
                     &mut mm_interfaces_added,
@@ -143,19 +156,23 @@ pub async fn run(
                 );
                 mm_modem_count_known = false;
 
-                if mm_status == logics::ModemManagerStatus::Active {
-                    let state = activate_modemmanager_state(&connection, &event_tx).await?;
-                    install_active_state(
-                        state,
-                        &mut mm_snapshot,
-                        &mut mm_object_manager,
-                        &mut mm_version_changes,
-                        &mut mm_interfaces_added,
-                        &mut mm_interfaces_removed,
-                        &mut mm_modem_tasks,
-                    );
+                if manager_presence == ManagerPresence::Present(logics::ModemManagerStatus::Active) {
+                    let state = activate_modemmanager_state(
+                        &connection,
+                        &event_tx,
+                        sms_command_registry.clone(),
+                    )
+                    .await?;
+                    mm_version = Some(state.version);
+                    mm_modem_count = Some(state.modem_count);
+                    mm_object_manager = Some(state.object_manager);
+                    mm_version_changes = Some(state.version_changes);
+                    mm_interfaces_added = Some(state.interfaces_added);
+                    mm_interfaces_removed = Some(state.interfaces_removed);
+                    mm_modem_tasks = Some(state.modem_tasks);
                     sync_modem_count(
-                        mm_snapshot.as_mut(),
+                        mm_version.as_deref(),
+                        mm_modem_count.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
                         &event_tx,
@@ -185,7 +202,8 @@ pub async fn run(
                         logics::dbus_signal_stream_closed_message(logics::MM_VERSION_CHANGED_SIGNAL)
                     );
                     clear_active_state(
-                        &mut mm_snapshot,
+                        &mut mm_version,
+                        &mut mm_modem_count,
                         &mut mm_object_manager,
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
@@ -196,20 +214,14 @@ pub async fn run(
                     continue;
                 };
 
-                if let Some(snapshot) = mm_snapshot.as_mut()
-                    && snapshot.version != version
+                if let Some(current_version) = mm_version.as_mut()
+                    && *current_version != version
                     && mm_modem_count_known
                 {
-                    snapshot.version = version;
-                    info!(target: LOG_TARGET, "{}", logics::modemmanager_snapshot_message(snapshot));
-                    emit_event(
-                        &event_tx,
-                        DbusEvent::Snapshot {
-                            version: snapshot.version.clone(),
-                            modem_count: snapshot.modem_count,
-                        },
-                    )
-                    .await;
+                    *current_version = version.clone();
+                    let update = logics::ManagerUpdate::Version(version);
+                    info!(target: LOG_TARGET, "{}", logics::manager_update_message(&update));
+                    emit_event(&event_tx, DbusEvent::ManagerUpdated(update)).await;
                 }
             }
             // ModemManager exports modems as ObjectManager child objects rather
@@ -242,7 +254,8 @@ pub async fn run(
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_ADDED_SIGNAL)
                     );
                     clear_active_state(
-                        &mut mm_snapshot,
+                        &mut mm_version,
+                        &mut mm_modem_count,
                         &mut mm_object_manager,
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
@@ -259,11 +272,17 @@ pub async fn run(
                     {
                         modem_tasks.insert(
                             modem_id.clone(),
-                            spawn_modem_task(&connection, modem_id, event_tx.clone()),
+                            spawn_modem_task(
+                                &connection,
+                                modem_id,
+                                event_tx.clone(),
+                                sms_command_registry.clone(),
+                            ),
                         );
                     }
                     sync_modem_count(
-                        mm_snapshot.as_mut(),
+                        mm_version.as_deref(),
+                        mm_modem_count.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
                         &event_tx,
@@ -297,7 +316,8 @@ pub async fn run(
                         logics::dbus_signal_stream_closed_message(logics::MM_INTERFACES_REMOVED_SIGNAL)
                     );
                     clear_active_state(
-                        &mut mm_snapshot,
+                        &mut mm_version,
+                        &mut mm_modem_count,
                         &mut mm_object_manager,
                         &mut mm_version_changes,
                         &mut mm_interfaces_added,
@@ -317,7 +337,8 @@ pub async fn run(
                     info!(target: LOG_TARGET, "{}", logics::modem_deleted_message(&modem_id));
                     emit_event(&event_tx, DbusEvent::ModemDeleted { modem_id }).await;
                     sync_modem_count(
-                        mm_snapshot.as_mut(),
+                        mm_version.as_deref(),
+                        mm_modem_count.as_mut(),
                         mm_object_manager.as_ref(),
                         &mut mm_modem_count_known,
                         &event_tx,
@@ -330,7 +351,13 @@ pub async fn run(
                     break;
                 };
 
-                handle_dbus_command(&connection, &event_tx, command).await?;
+                handle_dbus_command(
+                    &connection,
+                    &event_tx,
+                    &sms_command_registry,
+                    command,
+                )
+                .await?;
             }
         }
     }
@@ -355,10 +382,8 @@ async fn connect(dbus_address: Option<&str>) -> Result<Connection> {
 }
 
 /// Reads the ModemManager well-known name and activation metadata and returns
-/// the daemon's three-state availability model.
-async fn query_modemmanager_status(
-    dbus_proxy: &DBusProxy<'_>,
-) -> Result<logics::ModemManagerStatus> {
+/// whether the manager is active, merely activatable, or gone entirely.
+async fn query_manager_presence(dbus_proxy: &DBusProxy<'_>) -> Result<ManagerPresence> {
     let mm_bus_name =
         BusName::try_from(logics::MM_BUS_NAME).context("failed to parse ModemManager bus name")?;
 
@@ -367,7 +392,7 @@ async fn query_modemmanager_status(
         .await
         .context("failed to query ModemManager DBus owner")?
     {
-        Ok(logics::ModemManagerStatus::Active)
+        Ok(ManagerPresence::Present(logics::ModemManagerStatus::Active))
     } else {
         let activatable_names = dbus_proxy
             .list_activatable_names()
@@ -378,9 +403,11 @@ async fn query_modemmanager_status(
             .iter()
             .any(|name| name.as_str() == logics::MM_BUS_NAME)
         {
-            Ok(logics::ModemManagerStatus::Inactive)
+            Ok(ManagerPresence::Present(
+                logics::ModemManagerStatus::Inactive,
+            ))
         } else {
-            Ok(logics::ModemManagerStatus::NotFound)
+            Ok(ManagerPresence::Deleted)
         }
     }
 }
@@ -390,6 +417,7 @@ async fn query_modemmanager_status(
 async fn activate_modemmanager_state(
     connection: &Connection,
     event_tx: &mpsc::Sender<DbusEvent>,
+    sms_command_registry: SmsCommandRegistry,
 ) -> Result<ActiveModemManagerState> {
     let mm_proxy: Proxy<'static> = ProxyBuilder::new(connection)
         .destination(logics::MM_BUS_NAME)
@@ -425,13 +453,13 @@ async fn activate_modemmanager_state(
         .receive_interfaces_removed()
         .await
         .context("failed to subscribe to ModemManager InterfacesRemoved signal")?;
-    let modem_tasks = spawn_initial_modem_tasks(connection, &object_manager, event_tx).await?;
+    let modem_tasks =
+        spawn_initial_modem_tasks(connection, &object_manager, event_tx, sms_command_registry)
+            .await?;
 
     Ok(ActiveModemManagerState {
-        snapshot: logics::ModemManagerSnapshot {
-            version,
-            modem_count: 0,
-        },
+        version,
+        modem_count: 0,
         version_changes,
         object_manager,
         interfaces_added,
@@ -458,12 +486,16 @@ async fn query_modem_count(object_manager: &ObjectManagerProxy<'_>) -> Result<us
 }
 
 async fn sync_modem_count(
-    snapshot: Option<&mut logics::ModemManagerSnapshot>,
+    version: Option<&str>,
+    modem_count_state: Option<&mut usize>,
     object_manager: Option<&ObjectManagerProxy<'_>>,
     modem_count_known: &mut bool,
     event_tx: &mpsc::Sender<DbusEvent>,
 ) -> Result<()> {
-    let Some(snapshot) = snapshot else {
+    let Some(version) = version else {
+        return Ok(());
+    };
+    let Some(modem_count_state) = modem_count_state else {
         return Ok(());
     };
     let Some(object_manager) = object_manager else {
@@ -472,62 +504,59 @@ async fn sync_modem_count(
 
     let modem_count = query_modem_count(object_manager).await?;
     if !*modem_count_known {
-        snapshot.modem_count = modem_count;
+        *modem_count_state = modem_count;
         *modem_count_known = true;
-        info!(target: LOG_TARGET, "{}", logics::modemmanager_snapshot_message(snapshot));
+        info!(target: LOG_TARGET, "{}", logics::manager_found_message(version, modem_count));
         emit_event(
             event_tx,
-            DbusEvent::Snapshot {
-                version: snapshot.version.clone(),
+            DbusEvent::ManagerFound {
+                version: version.to_string(),
                 modem_count,
             },
         )
         .await;
-    } else if snapshot.modem_count != modem_count {
-        snapshot.modem_count = modem_count;
-        info!(
-            target: LOG_TARGET,
-            "{}",
-            logics::modemmanager_modem_count_changed_message(modem_count)
-        );
-        emit_event(event_tx, DbusEvent::ModemCountChanged { modem_count }).await;
+    } else if *modem_count_state != modem_count {
+        *modem_count_state = modem_count;
+        let update = logics::ManagerUpdate::ModemCount(modem_count);
+        info!(target: LOG_TARGET, "{}", logics::manager_update_message(&update));
+        emit_event(event_tx, DbusEvent::ManagerUpdated(update)).await;
     }
 
     Ok(())
 }
 
+async fn emit_manager_presence(event_tx: &mpsc::Sender<DbusEvent>, presence: ManagerPresence) {
+    match presence {
+        ManagerPresence::Present(status) => {
+            info!(target: LOG_TARGET, "{}", logics::modemmanager_status_message(status));
+            let update = logics::ManagerUpdate::Status(status);
+            emit_event(event_tx, DbusEvent::ManagerUpdated(update)).await;
+        }
+        ManagerPresence::Deleted => {
+            info!(target: LOG_TARGET, "{}", logics::manager_deleted_message());
+            emit_event(event_tx, DbusEvent::ManagerDeleted).await;
+        }
+    }
+}
+
 async fn emit_event(event_tx: &mpsc::Sender<DbusEvent>, event: DbusEvent) {
+    debug!(target: LOG_TARGET, "Sending DBus event to DISP: {event:?}");
     if event_tx.send(event).await.is_err() {
         debug!(target: LOG_TARGET, "Event channel closed while sending");
     }
 }
 
-fn install_active_state(
-    state: ActiveModemManagerState,
-    mm_snapshot: &mut Option<logics::ModemManagerSnapshot>,
-    mm_object_manager: &mut Option<ObjectManagerProxy<'static>>,
-    mm_version_changes: &mut Option<PropertyStream<'static, String>>,
-    mm_interfaces_added: &mut Option<InterfacesAddedStream>,
-    mm_interfaces_removed: &mut Option<InterfacesRemovedStream>,
-    mm_modem_tasks: &mut Option<HashMap<logics::ModemId, JoinHandle<()>>>,
-) {
-    *mm_snapshot = Some(state.snapshot);
-    *mm_object_manager = Some(state.object_manager);
-    *mm_version_changes = Some(state.version_changes);
-    *mm_interfaces_added = Some(state.interfaces_added);
-    *mm_interfaces_removed = Some(state.interfaces_removed);
-    *mm_modem_tasks = Some(state.modem_tasks);
-}
-
 fn clear_active_state(
-    mm_snapshot: &mut Option<logics::ModemManagerSnapshot>,
+    mm_version: &mut Option<String>,
+    mm_modem_count: &mut Option<usize>,
     mm_object_manager: &mut Option<ObjectManagerProxy<'static>>,
     mm_version_changes: &mut Option<PropertyStream<'static, String>>,
     mm_interfaces_added: &mut Option<InterfacesAddedStream>,
     mm_interfaces_removed: &mut Option<InterfacesRemovedStream>,
     mm_modem_tasks: &mut Option<HashMap<logics::ModemId, JoinHandle<()>>>,
 ) {
-    *mm_snapshot = None;
+    *mm_version = None;
+    *mm_modem_count = None;
     *mm_object_manager = None;
     *mm_version_changes = None;
     *mm_interfaces_added = None;
@@ -572,12 +601,18 @@ async fn spawn_initial_modem_tasks(
     connection: &Connection,
     object_manager: &ObjectManagerProxy<'_>,
     event_tx: &mpsc::Sender<DbusEvent>,
+    sms_command_registry: SmsCommandRegistry,
 ) -> Result<HashMap<logics::ModemId, JoinHandle<()>>> {
     let mut modem_tasks = HashMap::new();
     for modem_id in query_modem_ids(object_manager).await? {
         modem_tasks.insert(
             modem_id.clone(),
-            spawn_modem_task(connection, modem_id, event_tx.clone()),
+            spawn_modem_task(
+                connection,
+                modem_id,
+                event_tx.clone(),
+                sms_command_registry.clone(),
+            ),
         );
     }
     Ok(modem_tasks)
@@ -587,10 +622,13 @@ fn spawn_modem_task(
     connection: &Connection,
     modem_id: logics::ModemId,
     event_tx: mpsc::Sender<DbusEvent>,
+    sms_command_registry: SmsCommandRegistry,
 ) -> JoinHandle<()> {
     let connection = connection.clone();
     tokio::spawn(async move {
-        if let Err(err) = run_modem_task(connection, modem_id.clone(), event_tx).await {
+        if let Err(err) =
+            run_modem_task(connection, modem_id.clone(), event_tx, sms_command_registry).await
+        {
             debug!(target: LOG_TARGET, "Modem {} watcher failed: {err:#}", modem_id.0);
         }
     })
@@ -600,6 +638,7 @@ async fn run_modem_task(
     connection: Connection,
     modem_id: logics::ModemId,
     event_tx: mpsc::Sender<DbusEvent>,
+    sms_command_registry: SmsCommandRegistry,
 ) -> Result<()> {
     let modem_path = logics::modem_path_from_id(&modem_id);
     let modem_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
@@ -634,31 +673,41 @@ async fn run_modem_task(
     let mut raw_modem_state = queried_snapshot.raw_state;
     let mut snapshot = queried_snapshot.snapshot;
     let mut sms_inventory_task = None;
+    let mut sms_inventory_command_tx = None;
 
-    info!(target: LOG_TARGET, "{}", logics::modem_found_message(&modem_id));
+    info!(
+        target: LOG_TARGET,
+        "Modem {} data: {}",
+        modem_id.0,
+        snapshot.summary(),
+    );
     emit_event(
         &event_tx,
         DbusEvent::ModemFound {
             modem_id: modem_id.clone(),
-        },
-    )
-    .await;
-
-    info!(target: LOG_TARGET, "{}", logics::modem_snapshot_message(&modem_id, &snapshot));
-    emit_event(
-        &event_tx,
-        DbusEvent::ModemSnapshot {
-            modem_id: modem_id.clone(),
-            snapshot: snapshot.clone(),
+            is_active: snapshot.is_active,
+            model: snapshot.model.clone(),
+            revision: snapshot.revision.clone(),
+            state: snapshot.state.clone(),
+            primary_sim_slot: snapshot.primary_sim_slot,
+            operator_name: snapshot.operator_name.clone(),
+            signal_quality: snapshot.signal_quality,
         },
     )
     .await;
 
     if logics::modem_state_allows_sms_inventory(raw_modem_state) {
+        let (command_tx, command_rx) = mpsc::channel(16);
+        sms_inventory_command_tx = Some(command_tx.clone());
+        sms_command_registry
+            .lock()
+            .await
+            .insert(modem_id.clone(), command_tx);
         sms_inventory_task = Some(spawn_modem_sms_task(
             &connection,
             modem_id.clone(),
             event_tx.clone(),
+            command_rx,
         ));
     }
 
@@ -737,20 +786,29 @@ async fn run_modem_task(
                 }
                 if logics::modem_state_allows_sms_inventory(raw_modem_state) {
                     if sms_inventory_task.is_none() {
+                        let (command_tx, command_rx) = mpsc::channel(16);
+                        sms_inventory_command_tx = Some(command_tx.clone());
+                        sms_command_registry
+                            .lock()
+                            .await
+                            .insert(modem_id.clone(), command_tx);
                         sms_inventory_task = Some(spawn_modem_sms_task(
                             &connection,
                             modem_id.clone(),
                             event_tx.clone(),
+                            command_rx,
                         ));
                     }
                 } else if let Some(task) = sms_inventory_task.take() {
+                    sms_inventory_command_tx = None;
+                    sms_command_registry.lock().await.remove(&modem_id);
                     task.abort();
                     emit_event(
                         &event_tx,
                         DbusEvent::SmsInventorySnapshot {
                             modem_id: modem_id.clone(),
                             sms_ids: Vec::new(),
-                            last_sms_timestamp: None,
+                            initial_sms_snapshot: None,
                         },
                     )
                     .await;
@@ -798,6 +856,9 @@ async fn run_modem_task(
     if let Some(task) = sms_inventory_task {
         task.abort();
     }
+    if sms_inventory_command_tx.is_some() {
+        sms_command_registry.lock().await.remove(&modem_id);
+    }
 
     Ok(())
 }
@@ -806,10 +867,13 @@ fn spawn_modem_sms_task(
     connection: &Connection,
     modem_id: logics::ModemId,
     event_tx: mpsc::Sender<DbusEvent>,
+    command_rx: mpsc::Receiver<ModemSmsCommand>,
 ) -> JoinHandle<()> {
     let connection = connection.clone();
     tokio::spawn(async move {
-        if let Err(err) = run_modem_sms_task(connection, modem_id.clone(), event_tx).await {
+        if let Err(err) =
+            run_modem_sms_task(connection, modem_id.clone(), event_tx, command_rx).await
+        {
             debug!(
                 target: LOG_TARGET,
                 "Modem {} SMS inventory watcher failed: {err:#}",
@@ -823,6 +887,7 @@ async fn run_modem_sms_task(
     connection: Connection,
     modem_id: logics::ModemId,
     event_tx: mpsc::Sender<DbusEvent>,
+    mut command_rx: mpsc::Receiver<ModemSmsCommand>,
 ) -> Result<()> {
     let modem_path = logics::modem_path_from_id(&modem_id);
     let messaging_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
@@ -844,15 +909,14 @@ async fn run_modem_sms_task(
         .await;
 
     let initial_sms_ids = query_modem_sms_ids(&messaging_proxy).await?;
-    let initial_last_sms_timestamp =
-        query_last_sms_timestamp(&connection, &initial_sms_ids).await?;
+    let initial_sms_snapshot = query_initial_sms_snapshot(&connection, &initial_sms_ids).await?;
     info!(
         target: LOG_TARGET,
         "{}",
         logics::sms_inventory_snapshot_message(
             &modem_id,
             initial_sms_ids.len(),
-            initial_last_sms_timestamp,
+            initial_sms_snapshot.as_ref().map(|snapshot| &snapshot.sms_id),
         )
     );
     emit_event(
@@ -860,79 +924,126 @@ async fn run_modem_sms_task(
         DbusEvent::SmsInventorySnapshot {
             modem_id: modem_id.clone(),
             sms_ids: initial_sms_ids.clone(),
-            last_sms_timestamp: initial_last_sms_timestamp,
+            initial_sms_snapshot: initial_sms_snapshot.clone(),
         },
     )
     .await;
 
-    let mut sms_tasks = SmsTaskSet {
-        tasks: spawn_initial_sms_tasks(&connection, &modem_id, initial_sms_ids, &event_tx).await?,
-    };
-
-    loop {
-        let Some(change) = messages_changes.next().await else {
-            break;
-        };
-        let message_paths = change
-            .get()
-            .await
-            .context("failed to read modem Messages property change")?;
-        let sms_ids = sms_ids_from_paths(&message_paths);
-        sync_sms_tasks(
+    let mut known_sms_ids: HashSet<_> = initial_sms_ids.into_iter().collect();
+    let mut tracked_sms = TrackedSmsTask::default();
+    if let Some(initial_sms_snapshot) = initial_sms_snapshot {
+        retarget_sms_task(
             &connection,
             &modem_id,
             &event_tx,
-            &mut sms_tasks.tasks,
-            sms_ids,
+            &mut tracked_sms,
+            &known_sms_ids,
+            Some(&initial_sms_snapshot.sms_id),
         )
         .await?;
+    }
+
+    loop {
+        tokio::select! {
+            maybe_command = command_rx.recv() => {
+                let Some(command) = maybe_command else {
+                    break;
+                };
+                match command {
+                    ModemSmsCommand::TrackSms { sms_id } => {
+                        retarget_sms_task(
+                            &connection,
+                            &modem_id,
+                            &event_tx,
+                            &mut tracked_sms,
+                            &known_sms_ids,
+                            Some(&sms_id),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            change = messages_changes.next() => {
+                let Some(change) = change else {
+                    break;
+                };
+                let message_paths = change
+                    .get()
+                    .await
+                    .context("failed to read modem Messages property change")?;
+                let sms_ids = sms_ids_from_paths(&message_paths);
+                known_sms_ids = sms_ids.iter().cloned().collect();
+                sync_tracked_sms_task(
+                    &event_tx,
+                    &modem_id,
+                    &mut tracked_sms,
+                    sms_ids,
+                )
+                .await?;
+            }
+        }
     }
 
     Ok(())
 }
 
 #[derive(Default)]
-struct SmsTaskSet {
-    tasks: HashMap<logics::SmsId, JoinHandle<()>>,
+struct TrackedSmsTask {
+    sms_id: Option<logics::SmsId>,
+    task: Option<JoinHandle<()>>,
 }
 
-impl Drop for SmsTaskSet {
+impl Drop for TrackedSmsTask {
     fn drop(&mut self) {
-        for (_, task) in self.tasks.drain() {
+        if let Some(task) = self.task.take() {
             task.abort();
         }
     }
 }
 
-async fn spawn_initial_sms_tasks(
+async fn retarget_sms_task(
     connection: &Connection,
     modem_id: &logics::ModemId,
-    sms_ids: Vec<logics::SmsId>,
     event_tx: &mpsc::Sender<DbusEvent>,
-) -> Result<HashMap<logics::SmsId, JoinHandle<()>>> {
-    let mut sms_tasks = HashMap::new();
-
-    for sms_id in sms_ids {
-        if let Some(task) = spawn_sms_task(
-            connection,
-            modem_id.clone(),
-            sms_id.clone(),
-            event_tx.clone(),
-        )
-        .await?
-        {
-            sms_tasks.insert(sms_id, task);
-        }
+    tracked_sms: &mut TrackedSmsTask,
+    known_sms_ids: &HashSet<logics::SmsId>,
+    sms_id: Option<&logics::SmsId>,
+) -> Result<()> {
+    if tracked_sms.sms_id.as_ref() == sms_id {
+        return Ok(());
     }
 
-    Ok(sms_tasks)
+    if let Some(task) = tracked_sms.task.take() {
+        task.abort();
+    }
+    tracked_sms.sms_id = None;
+
+    let Some(sms_id) = sms_id else {
+        return Ok(());
+    };
+    if !known_sms_ids.contains(sms_id) {
+        return Ok(());
+    }
+
+    if let Some(task) = spawn_sms_task(
+        connection,
+        modem_id.clone(),
+        sms_id.clone(),
+        event_tx.clone(),
+    )
+    .await?
+    {
+        tracked_sms.sms_id = Some(sms_id.clone());
+        tracked_sms.task = Some(task);
+    }
+
+    Ok(())
 }
 
-async fn sync_sms_tasks(
-    connection: &Connection,
-    modem_id: &logics::ModemId,
+async fn sync_tracked_sms_task(
     event_tx: &mpsc::Sender<DbusEvent>,
-    sms_tasks: &mut HashMap<logics::SmsId, JoinHandle<()>>,
+    modem_id: &logics::ModemId,
+    tracked_sms: &mut TrackedSmsTask,
     current_sms_ids: Vec<logics::SmsId>,
 ) -> Result<()> {
     emit_event(
@@ -945,47 +1056,30 @@ async fn sync_sms_tasks(
     .await;
 
     let current_sms_ids: std::collections::HashSet<_> = current_sms_ids.into_iter().collect();
-    let tracked_sms_ids: Vec<_> = sms_tasks.keys().cloned().collect();
-
-    for sms_id in tracked_sms_ids {
-        if current_sms_ids.contains(&sms_id) {
-            continue;
-        }
-
-        if let Some(task) = sms_tasks.remove(&sms_id) {
-            task.abort();
-        }
-        info!(
-            target: LOG_TARGET,
-            "{}",
-            logics::sms_deleted_message(modem_id, &sms_id)
-        );
-        emit_event(
-            event_tx,
-            DbusEvent::SmsDeleted {
-                modem_id: modem_id.clone(),
-                sms_id,
-            },
-        )
-        .await;
+    let Some(sms_id) = tracked_sms.sms_id.clone() else {
+        return Ok(());
+    };
+    if current_sms_ids.contains(&sms_id) {
+        return Ok(());
     }
 
-    for sms_id in current_sms_ids {
-        if sms_tasks.contains_key(&sms_id) {
-            continue;
-        }
-
-        if let Some(task) = spawn_sms_task(
-            connection,
-            modem_id.clone(),
-            sms_id.clone(),
-            event_tx.clone(),
-        )
-        .await?
-        {
-            sms_tasks.insert(sms_id, task);
-        }
+    if let Some(task) = tracked_sms.task.take() {
+        task.abort();
     }
+    tracked_sms.sms_id = None;
+    info!(
+        target: LOG_TARGET,
+        "{}",
+        logics::sms_deleted_message(modem_id, &sms_id)
+    );
+    emit_event(
+        event_tx,
+        DbusEvent::SmsDeleted {
+            modem_id: modem_id.clone(),
+            sms_id,
+        },
+    )
+    .await;
 
     Ok(())
 }
@@ -1047,21 +1141,6 @@ async fn run_sms_task(
         .await;
     let mut number_changes = sms_proxy.receive_property_changed::<String>("Number").await;
     let mut text_changes = sms_proxy.receive_property_changed::<String>("Text").await;
-
-    info!(
-        target: LOG_TARGET,
-        "{}",
-        logics::sms_snapshot_message(&modem_id, &sms_id, &snapshot)
-    );
-    emit_event(
-        &event_tx,
-        DbusEvent::SmsSnapshot {
-            modem_id: modem_id.clone(),
-            sms_id: sms_id.clone(),
-            snapshot: snapshot.clone(),
-        },
-    )
-    .await;
 
     loop {
         tokio::select! {
@@ -1204,15 +1283,45 @@ fn sms_ids_from_paths(message_paths: &[OwnedObjectPath]) -> Vec<logics::SmsId> {
     sms_ids
 }
 
-struct QueriedModemSnapshot {
-    snapshot: logics::ModemSnapshot,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedModemState {
+    is_active: bool,
+    model: Option<String>,
+    revision: Option<String>,
+    state: Option<String>,
+    primary_sim_slot: Option<u32>,
+    operator_name: Option<String>,
+    signal_quality: Option<u32>,
+}
+
+impl TrackedModemState {
+    fn summary(&self) -> String {
+        format!(
+            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
+            self.is_active,
+            self.model.as_deref().unwrap_or("None"),
+            self.revision.as_deref().unwrap_or("None"),
+            self.state.as_deref().unwrap_or("None"),
+            self.primary_sim_slot
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "None".to_string()),
+            self.operator_name.as_deref().unwrap_or("None"),
+            self.signal_quality
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "None".to_string()),
+        )
+    }
+}
+
+struct QueriedModemState {
+    snapshot: TrackedModemState,
     raw_state: i32,
 }
 
 async fn query_modem_snapshot(
     connection: &Connection,
     modem_proxy: &Proxy<'_>,
-) -> Result<QueriedModemSnapshot> {
+) -> Result<QueriedModemState> {
     let model: String = modem_proxy
         .get_property("Model")
         .await
@@ -1238,8 +1347,8 @@ async fn query_modem_snapshot(
         .await
         .context("failed to read modem Sim property")?;
 
-    Ok(QueriedModemSnapshot {
-        snapshot: logics::ModemSnapshot {
+    Ok(QueriedModemState {
+        snapshot: TrackedModemState {
             is_active: logics::modem_state_is_active(state),
             model: Some(model),
             revision: Some(revision),
@@ -1252,48 +1361,15 @@ async fn query_modem_snapshot(
     })
 }
 
-async fn query_last_sms_timestamp(
+async fn query_initial_sms_snapshot(
     connection: &Connection,
     sms_ids: &[logics::SmsId],
-) -> Result<Option<OffsetDateTime>> {
-    let Some(last_sms_id) = sms_ids.last() else {
+) -> Result<Option<logics::SmsSnapshot>> {
+    let Some(initial_sms_id) = sms_ids.first() else {
         return Ok(None);
     };
 
-    query_sms_timestamp(connection, last_sms_id).await
-}
-
-async fn query_sms_timestamp(
-    connection: &Connection,
-    sms_id: &logics::SmsId,
-) -> Result<Option<OffsetDateTime>> {
-    let sms_path = logics::sms_path_from_id(sms_id);
-    let sms_proxy: Proxy<'_> = ProxyBuilder::new(connection)
-        .destination(logics::MM_BUS_NAME)
-        .context("failed to set SMS proxy destination")?
-        .path(sms_path.as_str())
-        .context("failed to set SMS proxy path")?
-        .interface(logics::MM_SMS_INTERFACE)
-        .context("failed to set SMS proxy interface")?
-        .cache_properties(CacheProperties::Yes)
-        .build()
-        .await
-        .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
-
-    let pdu_type: u32 = sms_proxy
-        .get_property("PduType")
-        .await
-        .context("failed to read SMS PduType property")?;
-    if !logics::is_incoming_sms_pdu(pdu_type) {
-        return Ok(None);
-    }
-
-    let timestamp: String = sms_proxy
-        .get_property("Timestamp")
-        .await
-        .context("failed to read SMS Timestamp property")?;
-
-    Ok(logics::parse_sms_timestamp(&timestamp))
+    query_sms_snapshot(connection, initial_sms_id).await
 }
 
 async fn query_sms_snapshot(
@@ -1339,6 +1415,7 @@ async fn query_sms_snapshot(
         .context("failed to read SMS Text property")?;
 
     Ok(Some(logics::SmsSnapshot {
+        sms_id: sms_id.clone(),
         is_received: logics::sms_is_received(state),
         timestamp: logics::parse_sms_timestamp(&timestamp),
         number: normalize_string(number),
@@ -1349,6 +1426,7 @@ async fn query_sms_snapshot(
 async fn handle_dbus_command(
     connection: &Connection,
     event_tx: &mpsc::Sender<DbusEvent>,
+    sms_command_registry: &SmsCommandRegistry,
     command: DbusCommand,
 ) -> Result<()> {
     match command {
@@ -1357,12 +1435,20 @@ async fn handle_dbus_command(
                 emit_event(
                     event_tx,
                     DbusEvent::SmsSnapshot {
-                        modem_id,
-                        sms_id,
+                        modem_id: modem_id.clone(),
+                        sms_id: sms_id.clone(),
                         snapshot,
                     },
                 )
                 .await;
+                if let Some(command_tx) = sms_command_registry.lock().await.get(&modem_id).cloned()
+                {
+                    let _ = command_tx
+                        .send(ModemSmsCommand::TrackSms {
+                            sms_id: sms_id.clone(),
+                        })
+                        .await;
+                }
             }
         }
         DbusCommand::DeleteSms { modem_id, sms_id } => {
