@@ -98,14 +98,12 @@ pub struct ModemSnapshot {
     pub primary_sim_slot: Option<u32>,
     pub operator_name: Option<String>,
     pub signal_quality: Option<u32>,
-    pub sms_count: usize,
-    pub last_sms_timestamp: Option<OffsetDateTime>,
 }
 
 impl ModemSnapshot {
     pub fn summary(&self) -> String {
         format!(
-            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}, sms_count={}, last_sms={}",
+            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
             self.is_active,
             format_option_string(self.model.as_deref()),
             format_option_string(self.revision.as_deref()),
@@ -113,8 +111,6 @@ impl ModemSnapshot {
             format_option_u32(self.primary_sim_slot),
             format_option_string(self.operator_name.as_deref()),
             format_option_u32(self.signal_quality),
-            self.sms_count,
-            format_option_timestamp(self.last_sms_timestamp),
         )
     }
 }
@@ -122,6 +118,7 @@ impl ModemSnapshot {
 /// Single modem-property update emitted from live DBus property changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModemUpdate {
+    IsActive(bool),
     Model(String),
     Revision(String),
     State(Option<String>),
@@ -133,6 +130,7 @@ pub enum ModemUpdate {
 impl ModemUpdate {
     pub fn summary(&self) -> String {
         match self {
+            ModemUpdate::IsActive(value) => format!("is_active={value}"),
             ModemUpdate::Model(value) => format!("model={value}"),
             ModemUpdate::Revision(value) => format!("revision={value}"),
             ModemUpdate::State(value) => {
@@ -292,6 +290,14 @@ pub fn modem_state_name(state: i32) -> &'static str {
     }
 }
 
+pub fn modem_state_allows_sms_inventory(state: i32) -> bool {
+    modem_state_is_active(state)
+}
+
+pub fn modem_state_is_active(state: i32) -> bool {
+    matches!(state, 6..=11)
+}
+
 pub fn modem_found_message(modem_id: &ModemId) -> String {
     format!("Modem {} found on DBus", modem_id.0)
 }
@@ -314,6 +320,18 @@ pub fn sms_snapshot_message(modem_id: &ModemId, sms_id: &SmsId, snapshot: &SmsSn
         modem_id.0,
         sms_id.0,
         snapshot.summary()
+    )
+}
+
+pub fn sms_inventory_snapshot_message(
+    modem_id: &ModemId,
+    sms_count: usize,
+    last_sms_timestamp: Option<OffsetDateTime>,
+) -> String {
+    format!(
+        "Modem {} SMS inventory: sms_count={sms_count}, last_sms={}",
+        modem_id.0,
+        format_option_timestamp(last_sms_timestamp),
     )
 }
 

@@ -115,30 +115,79 @@ Planned async components:
   Active | Inactive | NotFound`, but that three-state value is now private to
   the logic layer. The public MQTT device exposes only one trust switch:
   `is_available` (`1` when ModemManager data is trustworthy, `0` otherwise).
+- Current MQTT-side cleanup narrows that rule further:
+  - manager DBus status is still routed through the existing
+    `PublishModemManagerStatus(...)` command, but the MQTT side now maps it to
+    the public `is_available` control;
+  - MQTT Last Will publishes retained `0` to `is_available` instead of an
+    empty payload;
+  - graceful MQTT shutdown explicitly clears retained device/control topics
+    with QoS1 cleanup publishes and a short flush delay before disconnect, so
+    Last Will remains only the unexpected-exit fallback.
 - The current stage-0.2 manager-level DBus events are intentionally compact:
   `StatusChanged`, `Snapshot { version, modem_count }`, and
   `ModemCountChanged`.
 - Stage 0.2 also now includes typed per-modem events:
   `ModemFound`, `ModemSnapshot`, `ModemUpdated`, and `ModemDeleted`.
 - SMS support is now partially implemented end-to-end:
-  - DBus watches per-modem `Modem.Messaging.Messages` plus per-SMS property
-    changes;
+  - DBus does not subscribe to `Modem.Messaging.Messages` during the initial
+    modem snapshot; once modem state reaches `enabled` or later, it starts a
+    separate SMS inventory watcher, subscribes to `Messages`, reads the full SMS
+    list, and emits one `SmsInventorySnapshot` before live SMS changes;
+  - after the SMS inventory snapshot, DBus watches per-modem
+    `Modem.Messaging.Messages` plus per-SMS property changes;
+  - modem MQTT devices publish only base modem controls at creation time; the
+    per-modem SMS controls (`sms_count`, `last_sms`, `message_select`,
+    selected-SMS fields, and `delete_message`) are created lazily on the first
+    SMS-facing MQTT command produced from `SmsInventorySnapshot`;
   - the authoritative SMS order comes from the modem `Messages` property after
     stripping the constant `/org/freedesktop/ModemManager1/SMS/` prefix and
     sorting by the resulting numeric short ids;
-  - MQTT-side human selection numbering still starts from `1`, but tresher
-    maps that back to the ordered DBus short-id list;
-  - manager MQTT device publishes `sms_count`, visible `last_sms`, and hidden
-    `last_sms_unixtime`;
-  - each modem device publishes `sms_count`, writable `message_select`, and
-    visible/hidden last-SMS timestamp controls plus selected-SMS fields
-    (`selected_sms_timestamp`, hidden `selected_sms_timestamp_unixtime`,
-    `selected_sms_sender`, `selected_sms_text`, `selected_sms_is_received`);
+  - SMS ownership cleanup is implemented: tresher is now a thin router for SMS
+    facts and commands, while MQTT owns `sms_order`, `picked_sms_id`, a
+    `HashMap<SmsId, SmsSnapshot>` cache, and last-published SMS control values;
+  - MQTT-side human selection numbering starts from `1`, and MQTT maps it back
+    to the ordered DBus short-id list. `SmsId` is the stable identity;
+    `message_select` is only the derived UI index;
+  - the MQTT SMS cache must be updated by DBus events: `SmsSnapshot` inserts or
+    replaces a cached SMS, `SmsUpdated` patches the cached SMS and republishes
+    selected fields if it is current, `SmsDeleted` removes it, and inventory or
+    list changes retain only ids still present in `sms_order`;
+  - when the SMS list changes, MQTT should keep the current `picked_sms_id` if
+    that DBus id still exists, even if its UI index changes. If the picked id
+    disappeared, MQTT should choose a replacement by preserving the old
+    position, falling back to the new last SMS, or clearing selection if the
+    list is empty, then request a fresh snapshot for the replacement;
+  - empty SMS behavior after the first `SmsInventorySnapshot`: create the SMS
+    controls, publish `sms_count=0`, `last_sms=null`, `last_sms_unixtime=null`,
+    `message_select` as `readonly=true min=1 max=1 value=1`, selected-SMS fields
+    as `null`/`0`, and make `delete_message` readonly because there is nothing
+    to delete. Before the first SMS inventory snapshot, per-modem SMS controls
+    should not exist at all;
+  - manager MQTT device publishes incoming-SMS count (`sms_count`), visible
+    `last_sms`, and hidden `last_sms_unixtime`;
+  - each modem device publishes incoming-SMS count (`sms_count`), writable
+    `message_select`, visible/hidden last-SMS timestamp controls, selected-SMS
+    fields (`selected_sms_timestamp`, hidden `selected_sms_timestamp_unixtime`,
+    `selected_sms_sender`, `selected_sms_text`, `selected_sms_is_received`),
+    and a writable `delete_message` pushbutton for the currently picked SMS;
+  - modem `is_active` is `1` only when raw ModemManager state is `enabled` or
+    later (`6..=11`); before that the modem device may exist but is not treated
+    as active;
   - DBus and dispatcher pass SMS timestamps as `OffsetDateTime`; MQTT formats
     visible text controls and publishes paired hidden `meta/type=unixtime`
-    controls with integer unix time payloads;
-  - user writes to `message_select/on` are routed through
-    `MQTT -> Tresher -> DBUS -> Tresher -> MQTT`.
+    controls with integer unix time payloads. All `unixtime` controls are
+    marked `hidden=true` in both JSON meta and compatibility meta subtopics;
+  - MQTT publishes SMS-facing state changes immediately; hot-plug SMS inventory
+    churn is handled by the DBus-side SMS bootstrap, not by MQTT-side batching;
+  - user writes to `message_select/on` are handled by MQTT: it translates the
+    user-facing index to a DBus `SmsId`, publishes cached selected fields if
+    available, and requests a fresh `SmsSnapshot` through
+    `MQTT -> Tresher -> DBUS -> Tresher -> MQTT`;
+  - user writes to `delete_message/on` delete the currently visible/cached
+    picked SMS id via
+    `org.freedesktop.ModemManager1.Modem.Messaging.Delete(path)`; ordinary
+    DBus deletion events then drive MQTT cleanup/reselection.
 - Live verification on `wb.loc` confirmed:
   - manager topics publish `sms_count` and `last_sms`;
   - modem topics publish SMS count and selected-SMS fields;
@@ -146,6 +195,14 @@ Planned async components:
     of the ordered `Messages` list (`message_select=1`);
   - writing a new value to `/devices/mm_modem_1/controls/message_select/on`
     updates the selected-SMS MQTT topics.
+- The MQTT-owned SMS selection/cache refactor is compile- and unit-tested, but
+  still needs a live retest on `wb.loc` after this handoff update.
+- Live DBus monitoring on `wb.loc` confirmed that hot-plug SMS inventory arrives
+  as a burst of `Messages` changes before `registered`: the modem appears with
+  `Messages=[]`, later emits `Messages=[90]`, `Messages=[91,90]`, ...,
+  `Messages=[116..90]`, then transitions through `enabled` toward
+  `registered`. This is why SMS bootstrap is gated on `enabled` and published
+  as a separate inventory snapshot.
 - Live SMS add/delete/change events could not yet be tested against the modem
   because the current SIM is operator-blocked; only initial snapshot and
   MQTT-to-DBus selection flow are verified so far.
@@ -194,6 +251,8 @@ Planned async components:
 2. Build out stage 0.2 from manager-level exchange to richer mappings:
    - real MQTT publishing is in place, but topic/control semantics may still
      need small alignment passes against WB UI expectations;
+   - keep the `is_available` / Last Will cleanup intact: only one public trust
+     switch for ModemManager;
    - live SMS runtime events (new, deleted, partial-to-complete) still need
      verification on a working SIM;
    - keep the event/command types compact and reviewable as the DBus/MQTT

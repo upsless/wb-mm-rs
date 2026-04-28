@@ -1,17 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::Result;
-use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
-use crate::dbus::{ModemId, ModemManagerStatus, SmsId, SmsSnapshot, SmsUpdate};
+use crate::dbus::{ModemId, ModemManagerStatus};
 use crate::exchange::{DbusCommand, DbusEvent, MqttCommand, MqttEvent};
 
 const LOG_TARGET: &str = "DISP";
 
-/// Routes DBus and MQTT events, keeps per-modem state, and emits commands for
-/// the side that must act next.
+/// Routes DBus and MQTT events, keeps manager/modem announcement state, and
+/// emits commands for the side that must act next.
 pub async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
@@ -32,33 +31,21 @@ pub async fn run(
                 let Some(event) = maybe_event else {
                     break;
                 };
-                // The DBus command sender is replaced on every DBus reconnect,
-                // so we snapshot the current sender before awaiting.
-                let current_dbus_command_tx = dbus_command_tx_rx.borrow().clone();
 
                 debug!(target: LOG_TARGET, "Received DBus event: {event:?}");
-                route_dbus_event(
-                    event,
-                    &mut state,
-                    &mqtt_command_tx,
-                    current_dbus_command_tx.as_ref(),
-                ).await?;
+                route_dbus_event(event, &mut state, &mqtt_command_tx).await?;
             }
             maybe_event = mqtt_event_rx.recv() => {
                 let Some(event) = maybe_event else {
                     break;
                 };
-                // Same idea for MQTT-originated writes: selection events should
-                // use whichever DBus session is live right now.
+                // The DBus command sender is replaced on every DBus reconnect,
+                // so MQTT-originated writes use whichever DBus session is live
+                // right now.
                 let current_dbus_command_tx = dbus_command_tx_rx.borrow().clone();
 
                 debug!(target: LOG_TARGET, "Received MQTT event: {event:?}");
-                route_mqtt_event(
-                    event,
-                    &mut state,
-                    &mqtt_command_tx,
-                    current_dbus_command_tx.as_ref(),
-                ).await?;
+                route_mqtt_event(event, current_dbus_command_tx.as_ref()).await?;
             }
             changed = dbus_command_tx_rx.changed() => {
                 if changed.is_err() {
@@ -77,32 +64,13 @@ struct TresherState {
     last_status: Option<ModemManagerStatus>,
     last_version: Option<String>,
     last_modem_count: Option<usize>,
-    last_manager_sms_count: Option<usize>,
-    last_manager_last_sms: Option<Option<OffsetDateTime>>,
     modem_devices: HashSet<ModemId>,
-    modems: HashMap<ModemId, ModemState>,
-}
-
-#[derive(Debug, Default)]
-struct ModemState {
-    sms: HashMap<SmsId, SmsSnapshot>,
-    sms_order: Vec<SmsId>,
-    sms_count: usize,
-    last_sms_timestamp: Option<OffsetDateTime>,
-    selected_sms_id: Option<SmsId>,
-    last_sms_count: Option<usize>,
-    last_published_last_sms: Option<Option<OffsetDateTime>>,
-    last_selected_index: Option<Option<u32>>,
-    last_selected_max_index: Option<u32>,
-    last_selected_writable: Option<bool>,
-    last_selected_snapshot: Option<Option<SmsSnapshot>>,
 }
 
 async fn route_dbus_event(
     event: DbusEvent,
     state: &mut TresherState,
     mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-    dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
 ) -> Result<()> {
     ensure_manager_device(state, mqtt_command_tx).await?;
 
@@ -160,27 +128,17 @@ async fn route_dbus_event(
         }
         DbusEvent::ModemFound { modem_id } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
-            ensure_modem_state(state, &modem_id);
         }
         DbusEvent::ModemSnapshot { modem_id, snapshot } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
-            {
-                let modem_state = ensure_modem_state(state, &modem_id);
-                modem_state.sms_count = snapshot.sms_count;
-                modem_state.last_sms_timestamp = snapshot.last_sms_timestamp;
-                modem_state.last_sms_count = Some(snapshot.sms_count);
-                modem_state.last_published_last_sms = Some(snapshot.last_sms_timestamp);
-            }
             send_mqtt_command(
                 mqtt_command_tx,
                 MqttCommand::PublishModemSnapshot { modem_id, snapshot },
             )
             .await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
         }
         DbusEvent::ModemUpdated { modem_id, update } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
-            ensure_modem_state(state, &modem_id);
             send_mqtt_command(
                 mqtt_command_tx,
                 MqttCommand::PublishModemUpdate { modem_id, update },
@@ -196,8 +154,30 @@ async fn route_dbus_event(
             )
             .await?;
             state.modem_devices.remove(&modem_id);
-            state.modems.remove(&modem_id);
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
+        }
+        DbusEvent::SmsInventorySnapshot {
+            modem_id,
+            sms_ids,
+            last_sms_timestamp,
+        } => {
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_mqtt_command(
+                mqtt_command_tx,
+                MqttCommand::PublishSmsInventorySnapshot {
+                    modem_id,
+                    sms_ids,
+                    last_sms_timestamp,
+                },
+            )
+            .await?;
+        }
+        DbusEvent::SmsListChanged { modem_id, sms_ids } => {
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_mqtt_command(
+                mqtt_command_tx,
+                MqttCommand::PublishSmsList { modem_id, sms_ids },
+            )
+            .await?;
         }
         DbusEvent::SmsSnapshot {
             modem_id,
@@ -205,104 +185,39 @@ async fn route_dbus_event(
             snapshot,
         } => {
             ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
-            let (selected_before, selection_missing) = {
-                let modem_state = ensure_modem_state(state, &modem_id);
-                modem_state.sms.insert(sms_id.clone(), snapshot);
-                refresh_modem_last_sms_from_known_highest(modem_state);
-                (
-                    modem_state.selected_sms_id.as_ref() == Some(&sms_id),
-                    modem_state.selected_sms_id.is_none(),
-                )
-            };
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
-
-            if selected_before {
-                publish_selected_sms(state, mqtt_command_tx, &modem_id).await?;
-            } else if selection_missing {
-                ensure_selected_sms(state, mqtt_command_tx, &modem_id, dbus_command_tx).await?;
-            }
-        }
-        DbusEvent::SmsListChanged { modem_id, sms_ids } => {
-            let should_refresh_selected_sms = {
-                let modem_state = ensure_modem_state(state, &modem_id);
-                let had_any_sms_snapshots = !modem_state.sms.is_empty();
-                modem_state.sms_order = sms_ids;
-                modem_state.sms_count = modem_state.sms_order.len();
-                refresh_modem_last_sms_from_known_highest(modem_state);
-
-                if modem_state
-                    .selected_sms_id
-                    .as_ref()
-                    .is_some_and(|sms_id| !modem_state.sms_order.contains(sms_id))
-                {
-                    modem_state.selected_sms_id = None;
-                }
-
-                had_any_sms_snapshots
-            };
-
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
-            if should_refresh_selected_sms {
-                ensure_selected_sms(state, mqtt_command_tx, &modem_id, dbus_command_tx).await?;
-            }
+            send_mqtt_command(
+                mqtt_command_tx,
+                MqttCommand::PublishSmsSnapshot {
+                    modem_id,
+                    sms_id,
+                    snapshot,
+                },
+            )
+            .await?;
         }
         DbusEvent::SmsUpdated {
             modem_id,
             sms_id,
             update,
         } => {
-            let selected_now = {
-                let modem_state = ensure_modem_state(state, &modem_id);
-                let Some(snapshot) = modem_state.sms.get_mut(&sms_id) else {
-                    return Ok(());
-                };
-                apply_sms_update(snapshot, &update);
-                refresh_modem_last_sms_from_known_highest(modem_state);
-                modem_state.selected_sms_id.as_ref() == Some(&sms_id)
-            };
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
-
-            if selected_now {
-                publish_selected_sms(state, mqtt_command_tx, &modem_id).await?;
-            }
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_mqtt_command(
+                mqtt_command_tx,
+                MqttCommand::PublishSmsUpdate {
+                    modem_id,
+                    sms_id,
+                    update,
+                },
+            )
+            .await?;
         }
         DbusEvent::SmsDeleted { modem_id, sms_id } => {
-            let modem_state = ensure_modem_state(state, &modem_id);
-            modem_state.sms.remove(&sms_id);
-            modem_state
-                .sms_order
-                .retain(|known_sms_id| known_sms_id != &sms_id);
-            modem_state.sms_count = modem_state.sms_order.len();
-            if modem_state.selected_sms_id.as_ref() == Some(&sms_id) {
-                modem_state.selected_sms_id = None;
-            }
-            recalculate_modem_last_sms_from_known_order(modem_state);
-
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
-            ensure_selected_sms(state, mqtt_command_tx, &modem_id, dbus_command_tx).await?;
-        }
-        DbusEvent::SelectedSmsSnapshot {
-            modem_id,
-            sms_id,
-            snapshot,
-        } => {
-            let selected_now = {
-                let modem_state = ensure_modem_state(state, &modem_id);
-                modem_state.sms.insert(sms_id.clone(), snapshot);
-                refresh_modem_last_sms_from_known_highest(modem_state);
-                modem_state.selected_sms_id.as_ref() == Some(&sms_id)
-            };
-
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            sync_manager_sms_state(state, mqtt_command_tx).await?;
-
-            if selected_now {
-                publish_selected_sms(state, mqtt_command_tx, &modem_id).await?;
-            }
+            ensure_modem_device(state, mqtt_command_tx, &modem_id).await?;
+            send_mqtt_command(
+                mqtt_command_tx,
+                MqttCommand::PublishSmsDeleted { modem_id, sms_id },
+            )
+            .await?;
         }
     }
 
@@ -311,28 +226,22 @@ async fn route_dbus_event(
 
 async fn route_mqtt_event(
     event: MqttEvent,
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
     dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
 ) -> Result<()> {
-    match event {
-        MqttEvent::SelectModemSms {
-            modem_id,
-            selected_index,
-        } => {
-            let modem_state = ensure_modem_state(state, &modem_id);
-            let Some(sms_id) = modem_state
-                .sms_order
-                .get(selected_index.saturating_sub(1) as usize)
-                .cloned()
-            else {
-                return Ok(());
-            };
+    let Some(dbus_command_tx) = dbus_command_tx else {
+        return Ok(());
+    };
 
-            modem_state.selected_sms_id = Some(sms_id);
-            sync_modem_sms_state(state, mqtt_command_tx, &modem_id).await?;
-            request_selected_sms_refresh(state, mqtt_command_tx, &modem_id, dbus_command_tx)
-                .await?;
+    match event {
+        MqttEvent::RequestSmsSnapshot { modem_id, sms_id } => {
+            send_dbus_command(
+                dbus_command_tx,
+                DbusCommand::RefreshSms { modem_id, sms_id },
+            )
+            .await?;
+        }
+        MqttEvent::DeleteSms { modem_id, sms_id } => {
+            send_dbus_command(dbus_command_tx, DbusCommand::DeleteSms { modem_id, sms_id }).await?;
         }
     }
 
@@ -367,227 +276,6 @@ async fn ensure_modem_device(
     }
 
     Ok(())
-}
-
-fn ensure_modem_state<'a>(state: &'a mut TresherState, modem_id: &ModemId) -> &'a mut ModemState {
-    state.modems.entry(modem_id.clone()).or_default()
-}
-
-async fn sync_manager_sms_state(
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-) -> Result<()> {
-    let sms_count = state
-        .modems
-        .values()
-        .map(|modem_state| modem_state.sms_count)
-        .sum::<usize>();
-    let last_sms = state
-        .modems
-        .values()
-        .filter_map(|modem_state| modem_state.last_sms_timestamp)
-        .max();
-
-    if state.last_manager_sms_count != Some(sms_count) {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishModemManagerSmsCount(sms_count),
-        )
-        .await?;
-        state.last_manager_sms_count = Some(sms_count);
-    }
-
-    if state.last_manager_last_sms != Some(last_sms) {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishModemManagerLastSms(last_sms),
-        )
-        .await?;
-        state.last_manager_last_sms = Some(last_sms);
-    }
-
-    Ok(())
-}
-
-async fn sync_modem_sms_state(
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-    modem_id: &ModemId,
-) -> Result<()> {
-    let Some(modem_state) = state.modems.get_mut(modem_id) else {
-        return Ok(());
-    };
-
-    let sms_count = modem_state.sms_count;
-    if modem_state.last_sms_count != Some(sms_count) {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishModemSmsCount {
-                modem_id: modem_id.clone(),
-                sms_count,
-            },
-        )
-        .await?;
-        modem_state.last_sms_count = Some(sms_count);
-    }
-
-    if modem_state.last_published_last_sms != Some(modem_state.last_sms_timestamp) {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishModemLastSms {
-                modem_id: modem_id.clone(),
-                last_sms_timestamp: modem_state.last_sms_timestamp,
-            },
-        )
-        .await?;
-        modem_state.last_published_last_sms = Some(modem_state.last_sms_timestamp);
-    }
-
-    if modem_state.selected_sms_id.is_none() {
-        modem_state.selected_sms_id = modem_state.sms_order.first().cloned();
-    }
-
-    let selected_index = modem_state
-        .selected_sms_id
-        .as_ref()
-        .and_then(|selected_sms_id| {
-            modem_state
-                .sms_order
-                .iter()
-                .position(|sms_id| sms_id == selected_sms_id)
-        })
-        .map(|index| (index + 1) as u32);
-    let max_index = modem_state.sms_order.len().max(1) as u32;
-    let writable = !modem_state.sms_order.is_empty();
-
-    if modem_state.last_selected_index != Some(selected_index)
-        || modem_state.last_selected_max_index != Some(max_index)
-        || modem_state.last_selected_writable != Some(writable)
-    {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishModemSmsSelection {
-                modem_id: modem_id.clone(),
-                selected_index,
-                max_index,
-                writable,
-            },
-        )
-        .await?;
-        modem_state.last_selected_index = Some(selected_index);
-        modem_state.last_selected_max_index = Some(max_index);
-        modem_state.last_selected_writable = Some(writable);
-    }
-
-    Ok(())
-}
-
-async fn ensure_selected_sms(
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-    modem_id: &ModemId,
-    dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
-) -> Result<()> {
-    sync_modem_sms_state(state, mqtt_command_tx, modem_id).await?;
-    request_selected_sms_refresh(state, mqtt_command_tx, modem_id, dbus_command_tx).await
-}
-
-async fn request_selected_sms_refresh(
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-    modem_id: &ModemId,
-    dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
-) -> Result<()> {
-    let Some(modem_state) = state.modems.get(modem_id) else {
-        return Ok(());
-    };
-
-    let Some(selected_sms_id) = modem_state.selected_sms_id.clone() else {
-        publish_selected_sms(state, mqtt_command_tx, modem_id).await?;
-        return Ok(());
-    };
-
-    // Selection changes should exercise the real reverse path
-    // MQTT -> tresher -> DBus -> tresher -> MQTT.
-    // If DBus is temporarily unavailable, we still fall back to the cached
-    // snapshot so the MQTT side does not stay blank.
-    if let Some(dbus_command_tx) = dbus_command_tx {
-        send_dbus_command(
-            dbus_command_tx,
-            DbusCommand::RefreshSelectedSms {
-                modem_id: modem_id.clone(),
-                sms_id: selected_sms_id,
-            },
-        )
-        .await?;
-    } else {
-        publish_selected_sms(state, mqtt_command_tx, modem_id).await?;
-    }
-
-    Ok(())
-}
-
-async fn publish_selected_sms(
-    state: &mut TresherState,
-    mqtt_command_tx: &mpsc::Sender<MqttCommand>,
-    modem_id: &ModemId,
-) -> Result<()> {
-    let Some(modem_state) = state.modems.get_mut(modem_id) else {
-        return Ok(());
-    };
-
-    let selected_snapshot = modem_state
-        .selected_sms_id
-        .as_ref()
-        .and_then(|selected_sms_id| modem_state.sms.get(selected_sms_id))
-        .cloned();
-
-    if modem_state.last_selected_snapshot != Some(selected_snapshot.clone()) {
-        send_mqtt_command(
-            mqtt_command_tx,
-            MqttCommand::PublishSelectedSms {
-                modem_id: modem_id.clone(),
-                snapshot: selected_snapshot.clone(),
-            },
-        )
-        .await?;
-        modem_state.last_selected_snapshot = Some(selected_snapshot);
-    }
-
-    Ok(())
-}
-
-fn refresh_modem_last_sms_from_known_highest(modem_state: &mut ModemState) {
-    if modem_state.sms_order.is_empty() {
-        modem_state.last_sms_timestamp = None;
-        return;
-    }
-
-    let Some(highest_sms_id) = modem_state.sms_order.last() else {
-        return;
-    };
-
-    if let Some(snapshot) = modem_state.sms.get(highest_sms_id) {
-        modem_state.last_sms_timestamp = snapshot.timestamp;
-    }
-}
-
-fn recalculate_modem_last_sms_from_known_order(modem_state: &mut ModemState) {
-    modem_state.last_sms_timestamp = modem_state.sms_order.iter().rev().find_map(|sms_id| {
-        modem_state
-            .sms
-            .get(sms_id)
-            .and_then(|snapshot| snapshot.timestamp)
-    });
-}
-
-fn apply_sms_update(snapshot: &mut SmsSnapshot, update: &SmsUpdate) {
-    match update {
-        SmsUpdate::IsReceived(value) => snapshot.is_received = *value,
-        SmsUpdate::Timestamp(value) => snapshot.timestamp = *value,
-        SmsUpdate::Number(value) => snapshot.number = value.clone(),
-        SmsUpdate::Text(value) => snapshot.text = value.clone(),
-    }
 }
 
 async fn send_mqtt_command(

@@ -10,6 +10,20 @@ ModemManager integration.
 - Treat `upsless/wb-mm-mqtt` as reference code only.
 - Do not read `.env`, secrets, keys, tokens, or private deployment files.
 - Prefer small, reviewable diffs.
+- When the user is discussing or investigating a problem rather than directly
+  asking for implementation, first explain the likely cause and propose the
+  intended fix. Do not edit code until the user explicitly approves the fix.
+- If an external development or diagnostic tool that materially improves
+  productivity or accuracy is missing, stop the investigation and ask the user
+  to install it before building a custom workaround, unless the user explicitly
+  asks for a workaround. The request must include the tool name, a short
+  description of what it does, links to fuller documentation, available
+  alternatives, and the drawbacks of those alternatives. Example: if `rg`
+  (ripgrep, https://github.com/BurntSushi/ripgrep) is missing, explain that it
+  is a fast recursive code search tool that respects `.gitignore`; `grep` is an
+  available fallback, but it is slower and needs more manual filtering in large
+  repositories. If the user refuses to install a requested tool, record that
+  refusal in `docs/codex-handoff.md` and avoid requesting the same tool again.
 - Before broad refactors, explain the planned file-level changes.
 - If the user says that a change should be committed only after confirmation
   (for example, "commit only if I confirm" or "if I confirm, add it for future

@@ -47,10 +47,10 @@ pub enum DbusEvent {
         modem_id: ModemId,
         sms_id: SmsId,
     },
-    SelectedSmsSnapshot {
+    SmsInventorySnapshot {
         modem_id: ModemId,
-        sms_id: SmsId,
-        snapshot: SmsSnapshot,
+        sms_ids: Vec<SmsId>,
+        last_sms_timestamp: Option<OffsetDateTime>,
     },
 }
 
@@ -61,8 +61,6 @@ pub enum MqttCommand {
     PublishModemManagerStatus(ModemManagerStatus),
     PublishModemManagerVersion(String),
     PublishModemManagerModemCount(usize),
-    PublishModemManagerSmsCount(usize),
-    PublishModemManagerLastSms(Option<OffsetDateTime>),
     EnsureModemDevice {
         modem_id: ModemId,
     },
@@ -74,23 +72,28 @@ pub enum MqttCommand {
         modem_id: ModemId,
         update: ModemUpdate,
     },
-    PublishModemSmsCount {
+    PublishSmsInventorySnapshot {
         modem_id: ModemId,
-        sms_count: usize,
-    },
-    PublishModemLastSms {
-        modem_id: ModemId,
+        sms_ids: Vec<SmsId>,
         last_sms_timestamp: Option<OffsetDateTime>,
     },
-    PublishModemSmsSelection {
+    PublishSmsList {
         modem_id: ModemId,
-        selected_index: Option<u32>,
-        max_index: u32,
-        writable: bool,
+        sms_ids: Vec<SmsId>,
     },
-    PublishSelectedSms {
+    PublishSmsSnapshot {
         modem_id: ModemId,
-        snapshot: Option<SmsSnapshot>,
+        sms_id: SmsId,
+        snapshot: SmsSnapshot,
+    },
+    PublishSmsUpdate {
+        modem_id: ModemId,
+        sms_id: SmsId,
+        update: SmsUpdate,
+    },
+    PublishSmsDeleted {
+        modem_id: ModemId,
+        sms_id: SmsId,
     },
     DeleteModemDevice {
         modem_id: ModemId,
@@ -100,14 +103,13 @@ pub enum MqttCommand {
 /// MQTT writes that need dispatcher validation before DBus calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttEvent {
-    SelectModemSms {
-        modem_id: ModemId,
-        selected_index: u32,
-    },
+    RequestSmsSnapshot { modem_id: ModemId, sms_id: SmsId },
+    DeleteSms { modem_id: ModemId, sms_id: SmsId },
 }
 
 /// Commands emitted by the dispatcher and executed by the DBus loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbusCommand {
-    RefreshSelectedSms { modem_id: ModemId, sms_id: SmsId },
+    RefreshSms { modem_id: ModemId, sms_id: SmsId },
+    DeleteSms { modem_id: ModemId, sms_id: SmsId },
 }
