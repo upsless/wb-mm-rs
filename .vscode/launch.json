@@ -1,0 +1,61 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug wb-mm-mqtt",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin",
+          "wb-mm-mqtt"
+        ],
+        "filter": {
+          "name": "wb-mm-mqtt",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "--dbus-address",
+        "unixexec:path=ssh,argv1=-T,argv2=-q,argv3=root@wb.loc,argv4=systemd-stdio-bridge",
+        "--mqtt-address",
+        "tcp://wb.loc:1883"
+      ],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "gracefulShutdown": "SIGTERM",
+      "env": {
+        "RUST_LOG": "debug"
+      }
+    },
+    {
+      "name": "Debug wb-mm-mqtt (external)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin",
+          "wb-mm-mqtt"
+        ],
+        "filter": {
+          "name": "wb-mm-mqtt",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "--dbus-address",
+        "unixexec:path=ssh,argv1=-T,argv2=-q,argv3=root@wb.loc,argv4=systemd-stdio-bridge",
+        "--mqtt-address",
+        "tcp://wb.loc:1883"
+      ],
+      "cwd": "${workspaceFolder}",
+      "terminal": "external",
+      "gracefulShutdown": "SIGTERM",
+      "env": {
+        "RUST_LOG": "debug"
+      }
+    }
+  ]
+}
