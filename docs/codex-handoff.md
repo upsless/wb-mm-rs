@@ -186,17 +186,16 @@ Planned async components:
     `picked_sms_index: u32` (1-based desired user position), and
     `displayed_sms_id: Option<SmsId>` (DBus id of the SMS whose fields are
     actually visible now);
-  - the current implementation still carries older selection machinery such as
-    `picked_sms_id`, retained selected-SMS snapshots, derived displayed-index
-    state, and last-selected caches. Treat those as cleanup targets, not as
-    desired architecture;
+  - the 2026-04-30 implementation moved this model into `src/mqtt/state.rs`.
+    `MqttModemSmsState` owns SMS order, picker index, displayed SMS identity,
+    picker clamping, deletion/reselection rules, and snapshot/update acceptance
+    checks. MQTT publishing and tresher events remain in `src/mqtt/loop.rs`;
   - avoid confusing two different things named `displayed_sms_index`: the MQTT
     control id `MODEM_CONTROL_DISPLAYED_SMS_INDEX` is an external topic/control
-    name and should stay; the current Rust helper function
-    `displayed_sms_index()` is suspicious under the agreed model because it
-    derives an index from retained displayed snapshot state. In the target
-    model, the payload published to the `displayed_sms_index` control is simply
-    `picked_sms_index` at the moment an accepted snapshot is rendered;
+    name and should stay. The old Rust helper function `displayed_sms_index()`
+    has been removed; the payload published to the `displayed_sms_index`
+    control is `picked_sms_index` at the moment an accepted snapshot is
+    rendered;
   - MQTT-side human selection numbering starts from `1`. MQTT maps the desired
     index to DBus by reading `sms_order[picked_sms_index - 1]`; `SmsId` remains
     the stable DBus identity, while `picked_sms_index` is only the UI position
@@ -204,6 +203,12 @@ Planned async components:
   - when the SMS list changes, MQTT should keep `picked_sms_index` as a simple
     index, clamp it to the valid `1..=max(sms_order.len(), 1)` range, and
     request a fresh snapshot for the current indexed DBus id if one exists;
+  - when one SMS is deleted, MQTT-side picker behavior is position-based:
+    deleting an SMS after `picked_sms_index` only reduces count; deleting before
+    `picked_sms_index` decrements/clamps the picker and republishes
+    `message_select` without requesting a snapshot; deleting exactly at
+    `picked_sms_index` leaves/clamps the index as the desired position and
+    requests a replacement snapshot if a new SMS exists at that position;
   - empty SMS behavior after the first `SmsInventorySnapshot`: create the SMS
     controls, publish `last_sms_dbus_id=null`, `sms_count=0`, `message_select`
     as `readonly=true min=1 max=1 value=1`, selected-SMS fields as `null`/`0`,
@@ -231,7 +236,8 @@ Planned async components:
   - user writes to `message_select/on` are handled by MQTT: it updates
     `picked_sms_index`, maps that index to `sms_order[picked_sms_index - 1]`,
     and requests a fresh `SmsSnapshot` through
-    `MQTT -> Tresher -> DBUS -> Tresher -> MQTT`;
+    `MQTT -> Tresher -> DBUS -> Tresher -> MQTT` only when the effective
+    clamped index actually changes;
   - `SmsSnapshot` is accepted only when its `sms_id` equals the DBus id at the
     current `sms_order[picked_sms_index - 1]`. On match, MQTT publishes the SMS
     fields, publishes `displayed_sms_index = picked_sms_index`, records
@@ -250,6 +256,15 @@ Planned async components:
     a generic getter for it; expose methods that answer the business questions,
     for example `delete_message() -> Option<SmsId>` for the button action and
     `accepts_sms_update(&SmsId) -> bool` for live SMS updates;
+  - `displayed_sms_id` is changed only by accepting a snapshot. SMS list
+    changes and deletions do not clear it; if a replacement snapshot is needed,
+    `delete_message` is made readonly while the old selected-SMS fields may
+    remain visible until the new snapshot commits;
+  - next SMS-state check: when the SMS list becomes empty and the MQTT handler
+    clears selected-SMS fields, decide whether the handler should also call an
+    explicit state method to set `displayed_sms_id=None`. The current intended
+    owner for that behavior is the MQTT handler, not generic list mutation in
+    `MqttModemSmsState`;
   - `displayed_sms_index` is not dead code: it is the readonly published
     commit marker telling which desired user index has actually been rendered
     into the selected-SMS fields.
@@ -260,10 +275,11 @@ Planned async components:
     of the ordered `Messages` list (`message_select=1`);
   - writing a new value to `/devices/mm_modem_1/controls/message_select/on`
     updates the selected-SMS MQTT topics.
-- The existing MQTT-owned SMS selection/commit implementation is compile- and
-  unit-tested, but it is now known to be overcomplicated. The 2026-04-29
-  `picked_sms_index + displayed_sms_id` cleanup target above should be applied
-  before treating the SMS selection model as settled.
+- The MQTT-owned SMS selection/commit implementation is compile- and
+  unit-tested as of 2026-04-30 with the `picked_sms_index + displayed_sms_id`
+  model in `src/mqtt/state.rs`. Latest local checks passed:
+  `cargo fmt --check`, `cargo test`, and
+  `cargo clippy --all-targets --all-features`.
 - Live DBus monitoring on `wb.loc` confirmed that hot-plug SMS inventory arrives
   as a burst of `Messages` changes before `registered`: the modem appears with
   `Messages=[]`, later emits `Messages=[90]`, `Messages=[91,90]`, ...,
@@ -304,6 +320,8 @@ Planned async components:
 - `docs/architecture.md` - architecture notes.
 - `docs/dev-workflow.md` - machine/Git workflow.
 - `docs/reference-wb-mm.md` - reference project notes and findings.
+- `src/mqtt/state.rs` - MQTT-side state machines; currently contains
+  `MqttModemSmsState` and focused unit tests for SMS picker/selection rules.
 - `.agents/skills/modemmanager-mqtt-review/SKILL.md` - local Codex skill.
 
 ## Next Likely Work
