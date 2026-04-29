@@ -590,7 +590,7 @@ impl MqttFrontend {
             let modem_sms = self.state.modem_sms.entry(modem_id.clone()).or_default();
             let _ = apply_sms_order(modem_sms, sms_ids);
             match (
-                modem_sms.picked_sms_id.clone(),
+                modem_sms.picked_sms_id().cloned(),
                 initial_sms_snapshot.as_ref(),
             ) {
                 (Some(picked_sms_id), Some(snapshot)) if snapshot.sms_id == picked_sms_id => {
@@ -653,9 +653,7 @@ impl MqttFrontend {
         let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
             return Ok(());
         };
-        if !modem_sms.sms_order.contains(&sms_id)
-            || modem_sms.picked_sms_id.as_ref() != Some(&sms_id)
-        {
+        if !modem_sms.sms_order.contains(&sms_id) || modem_sms.picked_sms_id() != Some(&sms_id) {
             return Ok(());
         }
 
@@ -674,7 +672,7 @@ impl MqttFrontend {
         let Some(modem_sms) = self.state.modem_sms.get_mut(&modem_id) else {
             return Ok(());
         };
-        if modem_sms.picked_sms_id.as_ref() != Some(&sms_id) {
+        if modem_sms.picked_sms_id() != Some(&sms_id) {
             return Ok(());
         }
 
@@ -731,21 +729,11 @@ impl MqttFrontend {
         picked_index: u32,
         mqtt_event_tx: &mpsc::Sender<MqttEvent>,
     ) -> Result<()> {
-        let request_sms_id = if let Some(picked_index) = picked_index.checked_sub(1) {
-            self.state
-                .modem_sms
-                .get_mut(&modem_id)
-                .and_then(|modem_sms| {
-                    let sms_id = modem_sms.sms_order.get(picked_index as usize).cloned()?;
-                    if modem_sms.picked_sms_id.as_ref() == Some(&sms_id) {
-                        return None;
-                    }
-                    modem_sms.picked_sms_id = Some(sms_id.clone());
-                    Some(sms_id)
-                })
-        } else {
-            None
-        };
+        let request_sms_id = self
+            .state
+            .modem_sms
+            .get_mut(&modem_id)
+            .and_then(|modem_sms| modem_sms.set_picked_sms_index(picked_index));
 
         self.sync_modem_sms_state(&modem_id).await?;
         if request_sms_id.is_some() {
@@ -1273,10 +1261,10 @@ struct MqttSessionState {
     last_manager_sms_count: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct MqttModemSmsState {
     sms_order: Vec<SmsId>,
-    picked_sms_id: Option<SmsId>,
+    picked_sms_index: u32,
     displayed_sms_snapshot: Option<SmsSnapshot>,
     last_sms_count: Option<usize>,
     last_published_last_sms_id: Option<Option<SmsId>>,
@@ -1284,6 +1272,39 @@ struct MqttModemSmsState {
     last_selected_max_index: Option<u32>,
     last_selected_writable: Option<bool>,
     last_selected_snapshot: Option<Option<SmsSnapshot>>,
+}
+
+impl Default for MqttModemSmsState {
+    fn default() -> Self {
+        Self {
+            sms_order: Vec::new(),
+            picked_sms_index: 1,
+            displayed_sms_snapshot: None,
+            last_sms_count: None,
+            last_published_last_sms_id: None,
+            last_selected_index: None,
+            last_selected_max_index: None,
+            last_selected_writable: None,
+            last_selected_snapshot: None,
+        }
+    }
+}
+
+impl MqttModemSmsState {
+    fn picked_sms_id(&self) -> Option<&SmsId> {
+        let picked_index = self.picked_sms_index.checked_sub(1)?;
+        self.sms_order.get(picked_index as usize)
+    }
+
+    fn set_picked_sms_index(&mut self, picked_sms_index: u32) -> Option<SmsId> {
+        let picked_sms_index = clamp_sms_index(picked_sms_index, self.sms_order.len());
+        if self.picked_sms_index == picked_sms_index {
+            return None;
+        }
+
+        self.picked_sms_index = picked_sms_index;
+        self.picked_sms_id().cloned()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1549,36 +1570,19 @@ async fn request_sms_snapshot(
 }
 
 fn apply_sms_order(modem_sms: &mut MqttModemSmsState, sms_ids: Vec<SmsId>) -> Option<SmsId> {
-    let old_picked_sms_id = modem_sms.picked_sms_id.clone();
-    let old_picked_index = old_picked_sms_id
-        .as_ref()
-        .and_then(|picked_sms_id| {
-            modem_sms
-                .sms_order
-                .iter()
-                .position(|sms_id| sms_id == picked_sms_id)
-        })
-        .unwrap_or(0);
+    let old_picked_sms_id = modem_sms.picked_sms_id().cloned();
 
     modem_sms.sms_order = sms_ids;
+    modem_sms.picked_sms_index =
+        clamp_sms_index(modem_sms.picked_sms_index, modem_sms.sms_order.len());
 
-    let picked_sms_id = match old_picked_sms_id {
-        Some(old_picked_sms_id) if modem_sms.sms_order.contains(&old_picked_sms_id) => {
-            Some(old_picked_sms_id)
-        }
-        _ if modem_sms.sms_order.is_empty() => None,
-        _ => {
-            let picked_index = old_picked_index.min(modem_sms.sms_order.len() - 1);
-            Some(modem_sms.sms_order[picked_index].clone())
-        }
-    };
-
-    let changed = modem_sms.picked_sms_id != picked_sms_id;
-    modem_sms.picked_sms_id = picked_sms_id.clone();
-    if modem_sms.picked_sms_id.is_none() {
+    let picked_sms_id = modem_sms.picked_sms_id().cloned();
+    if picked_sms_id.is_none() {
         modem_sms.displayed_sms_snapshot = None;
     }
-    changed.then_some(picked_sms_id).flatten()
+    (old_picked_sms_id != picked_sms_id)
+        .then_some(picked_sms_id)
+        .flatten()
 }
 
 fn displayed_sms_index(modem_sms: &MqttModemSmsState) -> Option<u32> {
@@ -1613,6 +1617,10 @@ fn apply_sms_update_to_snapshot(snapshot: &mut SmsSnapshot, update: SmsUpdate) {
 
 fn max_sms_index(sms_count: usize) -> u32 {
     u32::try_from(sms_count).unwrap_or(u32::MAX).max(1)
+}
+
+fn clamp_sms_index(index: u32, sms_count: usize) -> u32 {
+    index.clamp(1, max_sms_index(sms_count))
 }
 
 #[cfg(test)]
@@ -1685,44 +1693,57 @@ mod tests {
     }
 
     #[test]
-    fn sms_order_keeps_picked_sms_by_dbus_id() {
+    fn picked_sms_id_uses_picked_sms_index() {
+        let state = MqttModemSmsState {
+            sms_order: sms_ids(&["144", "145", "146"]),
+            picked_sms_index: 2,
+            ..Default::default()
+        };
+
+        assert_eq!(state.picked_sms_id(), Some(&SmsId("145".to_string())));
+    }
+
+    #[test]
+    fn sms_order_keeps_picked_index_not_dbus_id() {
         let mut state = MqttModemSmsState {
             sms_order: sms_ids(&["144", "145", "146"]),
-            picked_sms_id: Some(SmsId("145".to_string())),
+            picked_sms_index: 2,
             ..Default::default()
         };
 
         let request_sms_id = apply_sms_order(&mut state, sms_ids(&["145", "146"]));
 
-        assert_eq!(state.picked_sms_id, Some(SmsId("145".to_string())));
-        assert_eq!(request_sms_id, None);
+        assert_eq!(state.picked_sms_index, 2);
+        assert_eq!(state.picked_sms_id(), Some(&SmsId("146".to_string())));
+        assert_eq!(request_sms_id, Some(SmsId("146".to_string())));
     }
 
     #[test]
-    fn sms_order_preserves_position_when_picked_sms_disappears() {
+    fn sms_order_clamps_picked_index_when_list_shrinks() {
         let mut state = MqttModemSmsState {
             sms_order: sms_ids(&["144", "145", "146"]),
-            picked_sms_id: Some(SmsId("145".to_string())),
+            picked_sms_index: 3,
             ..Default::default()
         };
 
-        let request_sms_id = apply_sms_order(&mut state, sms_ids(&["144", "146"]));
+        let request_sms_id = apply_sms_order(&mut state, sms_ids(&["144"]));
 
-        assert_eq!(state.picked_sms_id, Some(SmsId("146".to_string())));
-        assert_eq!(request_sms_id, Some(SmsId("146".to_string())));
+        assert_eq!(state.picked_sms_index, 1);
+        assert_eq!(state.picked_sms_id(), Some(&SmsId("144".to_string())));
+        assert_eq!(request_sms_id, Some(SmsId("144".to_string())));
     }
 
     #[test]
     fn sms_order_clears_empty_selection() {
         let mut state = MqttModemSmsState {
             sms_order: sms_ids(&["144"]),
-            picked_sms_id: Some(SmsId("144".to_string())),
             ..Default::default()
         };
 
         let request_sms_id = apply_sms_order(&mut state, Vec::new());
 
-        assert_eq!(state.picked_sms_id, None);
+        assert_eq!(state.picked_sms_index, 1);
+        assert_eq!(state.picked_sms_id(), None);
         assert_eq!(request_sms_id, None);
     }
 
@@ -1730,7 +1751,6 @@ mod tests {
     fn sms_order_clears_displayed_snapshot_when_selection_becomes_empty() {
         let mut state = MqttModemSmsState {
             sms_order: sms_ids(&["144"]),
-            picked_sms_id: Some(SmsId("144".to_string())),
             displayed_sms_snapshot: Some(sms_snapshot("144")),
             ..Default::default()
         };
