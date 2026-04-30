@@ -28,16 +28,14 @@ pub enum DbusEvent {
     },
     SmsSnapshot {
         modem_id: ModemId,
-        sms_id: SmsId,
         snapshot: SmsSnapshot,
     },
     SmsListChanged {
         modem_id: ModemId,
         sms_ids: Vec<SmsId>,
     },
-    SmsUpdated {
+    SmsPropertyChanged {
         modem_id: ModemId,
-        sms_id: SmsId,
         update: SmsUpdate,
     },
     SmsDeleted {
@@ -85,12 +83,10 @@ pub enum MqttCommand {
     },
     PublishSmsSnapshot {
         modem_id: ModemId,
-        sms_id: SmsId,
         snapshot: SmsSnapshot,
     },
     PublishSmsUpdate {
         modem_id: ModemId,
-        sms_id: SmsId,
         update: SmsUpdate,
     },
     PublishSmsDeleted {

@@ -153,24 +153,41 @@ impl SmsSnapshot {
     }
 }
 
-/// Single SMS-property update emitted from live DBus property changes.
+/// SMS update emitted toward the frontend projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SmsUpdate {
+pub struct SmsUpdate {
+    pub sms_id: SmsId,
+    pub property: SmsPropertyChange,
+}
+
+impl SmsUpdate {
+    pub fn summary(&self) -> String {
+        self.property.summary()
+    }
+}
+
+/// Single SMS property change observed from live DBus property changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmsPropertyChange {
     IsReceived(bool),
     Timestamp(Option<OffsetDateTime>),
     Number(Option<String>),
     Text(Option<String>),
 }
 
-impl SmsUpdate {
+impl SmsPropertyChange {
     pub fn summary(&self) -> String {
         match self {
-            SmsUpdate::IsReceived(value) => format!("is_received={value}"),
-            SmsUpdate::Timestamp(value) => format!("timestamp={}", format_option_timestamp(*value)),
-            SmsUpdate::Number(value) => {
+            SmsPropertyChange::IsReceived(value) => format!("is_received={value}"),
+            SmsPropertyChange::Timestamp(value) => {
+                format!("timestamp={}", format_option_timestamp(*value))
+            }
+            SmsPropertyChange::Number(value) => {
                 format!("sender={}", format_option_string(value.as_deref()))
             }
-            SmsUpdate::Text(value) => format!("text={}", format_text_summary(value.as_deref())),
+            SmsPropertyChange::Text(value) => {
+                format!("text={}", format_text_summary(value.as_deref()))
+            }
         }
     }
 }
@@ -312,11 +329,11 @@ pub fn sms_inventory_snapshot_message(
     )
 }
 
-pub fn sms_update_message(modem_id: &ModemId, sms_id: &SmsId, update: &SmsUpdate) -> String {
+pub fn sms_property_changed_message(modem_id: &ModemId, update: &SmsUpdate) -> String {
     format!(
         "Modem {} SMS {} changed: {}",
         modem_id.0,
-        sms_id.0,
+        update.sms_id.0,
         update.summary()
     )
 }

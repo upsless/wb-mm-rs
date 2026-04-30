@@ -131,33 +131,17 @@ async fn route_dbus_event(
             )
             .await?;
         }
-        DbusEvent::SmsSnapshot {
-            modem_id,
-            sms_id,
-            snapshot,
-        } => {
+        DbusEvent::SmsSnapshot { modem_id, snapshot } => {
             send_to_mqtt(
                 mqtt_message_tx,
-                MqttCommand::PublishSmsSnapshot {
-                    modem_id,
-                    sms_id,
-                    snapshot,
-                },
+                MqttCommand::PublishSmsSnapshot { modem_id, snapshot },
             )
             .await?;
         }
-        DbusEvent::SmsUpdated {
-            modem_id,
-            sms_id,
-            update,
-        } => {
+        DbusEvent::SmsPropertyChanged { modem_id, update } => {
             send_to_mqtt(
                 mqtt_message_tx,
-                MqttCommand::PublishSmsUpdate {
-                    modem_id,
-                    sms_id,
-                    update,
-                },
+                MqttCommand::PublishSmsUpdate { modem_id, update },
             )
             .await?;
         }

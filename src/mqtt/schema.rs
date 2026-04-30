@@ -189,8 +189,8 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
     },
     ControlSpec {
         name: MODEM_CONTROL_LAST_SMS_DBUS_ID,
-        title_en: "Last SMS DBus ID",
-        title_ru: "Последняя СМС, DBus#",
+        title_en: "Last incoming SMS DBus#",
+        title_ru: "Последняя вх.СМС, DBus#",
         order: 18,
         control_type: "text",
         readonly: true,
@@ -211,8 +211,8 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
     },
     ControlSpec {
         name: MODEM_CONTROL_MESSAGE_SELECT,
-        title_en: "SMS pick",
-        title_ru: "Выбор СМС",
+        title_en: "Incoming SMS pick:",
+        title_ru: "Выбор входящей СМС:",
         order: 20,
         control_type: "range",
         readonly: true,
@@ -222,8 +222,8 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
     },
     ControlSpec {
         name: MODEM_CONTROL_SELECTED_SMS_DBUS_ID,
-        title_en: "SMS DBus ID",
-        title_ru: "СМС DBus-id",
+        title_en: "SMS DBus#",
+        title_ru: "СМС DBus#",
         order: 25,
         control_type: "text",
         readonly: true,

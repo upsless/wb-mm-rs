@@ -1157,11 +1157,11 @@ async fn run_sms_task(
                 );
                 if snapshot.is_received != is_received {
                     snapshot.is_received = is_received;
-                    emit_sms_update(
+                    emit_sms_property_change(
                         &event_tx,
                         &modem_id,
                         &sms_id,
-                        logics::SmsUpdate::IsReceived(is_received),
+                        logics::SmsPropertyChange::IsReceived(is_received),
                     )
                     .await;
                 }
@@ -1179,11 +1179,11 @@ async fn run_sms_task(
                 );
                 if snapshot.timestamp != timestamp {
                     snapshot.timestamp = timestamp;
-                    emit_sms_update(
+                    emit_sms_property_change(
                         &event_tx,
                         &modem_id,
                         &sms_id,
-                        logics::SmsUpdate::Timestamp(timestamp),
+                        logics::SmsPropertyChange::Timestamp(timestamp),
                     )
                     .await;
                 }
@@ -1201,11 +1201,11 @@ async fn run_sms_task(
                 );
                 if snapshot.number != number {
                     snapshot.number = number.clone();
-                    emit_sms_update(
+                    emit_sms_property_change(
                         &event_tx,
                         &modem_id,
                         &sms_id,
-                        logics::SmsUpdate::Number(number),
+                        logics::SmsPropertyChange::Number(number),
                     )
                     .await;
                 }
@@ -1223,11 +1223,11 @@ async fn run_sms_task(
                 );
                 if snapshot.text != text {
                     snapshot.text = text.clone();
-                    emit_sms_update(
+                    emit_sms_property_change(
                         &event_tx,
                         &modem_id,
                         &sms_id,
-                        logics::SmsUpdate::Text(text),
+                        logics::SmsPropertyChange::Text(text),
                     )
                     .await;
                 }
@@ -1238,22 +1238,25 @@ async fn run_sms_task(
     Ok(())
 }
 
-async fn emit_sms_update(
+async fn emit_sms_property_change(
     event_tx: &mpsc::Sender<DbusEvent>,
     modem_id: &logics::ModemId,
     sms_id: &logics::SmsId,
-    update: logics::SmsUpdate,
+    property: logics::SmsPropertyChange,
 ) {
+    let update = logics::SmsUpdate {
+        sms_id: sms_id.clone(),
+        property,
+    };
     info!(
         target: LOG_TARGET,
         "{}",
-        logics::sms_update_message(modem_id, sms_id, &update)
+        logics::sms_property_changed_message(modem_id, &update)
     );
     emit_event(
         event_tx,
-        DbusEvent::SmsUpdated {
+        DbusEvent::SmsPropertyChanged {
             modem_id: modem_id.clone(),
-            sms_id: sms_id.clone(),
             update,
         },
     )
@@ -1436,7 +1439,6 @@ async fn handle_dbus_command(
                     event_tx,
                     DbusEvent::SmsSnapshot {
                         modem_id: modem_id.clone(),
-                        sms_id: sms_id.clone(),
                         snapshot,
                     },
                 )
