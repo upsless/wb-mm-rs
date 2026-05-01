@@ -227,6 +227,15 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   after modem SMS state has already been synced: make delete read-only while a
   new snapshot is pending, optionally sync manager SMS count, and request the
   needed snapshot.
+- MQTT schema now keeps modem base controls and SMS controls in separate arrays
+  instead of slicing one combined list with `MODEM_BASE_CONTROL_COUNT`.
+- MQTT update/snapshot/sync paths that should not create devices now use a
+  plain modem-index lookup. Device creation is owned by `ModemFound` via
+  `handle_modem_found()`; initial SMS inventory for an unknown modem is ignored.
+- MQTT state tracks `manager_available` and per-modem `is_active`. User writes
+  to modem `/on` topics are ignored while ModemManager is unavailable or the
+  target modem is inactive; WB readonly metadata is UI guidance, not backend
+  protection.
 - Tests were moved out of `state.rs` into `src/mqtt/state/tests.rs`.
 - Latest local checks after these changes passed:
   - `cargo fmt --check`
@@ -307,21 +316,15 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-6. Split `MODEM_CONTROL_SPECS` into explicit base and SMS control arrays
-   instead of using `MODEM_BASE_CONTROL_COUNT`; this is less clever and safer
-   when controls are inserted or reordered.
-7. Re-check whether `MqttModemFoundPayload` is now a leftover from before
+6. Re-check whether `MqttModemFoundPayload` is now a leftover from before
    `MqttModemState`; it may be removable or better represented by state/domain
    structures.
-8. Add an explicit guard for user `/on` topics while ModemManager is
-   unavailable. MQTT readonly metadata affects the UI, not direct publications
-   to `/on`.
-9. Re-check the stale `displayed_sms_id` policy after more cleanup:
+7. Re-check the stale `displayed_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
      also set `displayed_sms_id=None`.
-10. Verify live SMS add/delete/change behavior on a working SIM.
-11. Add focused tests around reconnect/lifecycle ordering where practical.
-12. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+8. Verify live SMS add/delete/change behavior on a working SIM.
+9. Add focused tests around reconnect/lifecycle ordering where practical.
+10. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.

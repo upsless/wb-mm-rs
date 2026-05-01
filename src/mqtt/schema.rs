@@ -106,7 +106,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
     },
 ];
 
-const MODEM_CONTROL_SPECS: [ControlSpec; 20] = [
+const MODEM_BASE_CONTROL_SPECS: [ControlSpec; 8] = [
     ControlSpec {
         name: MODEM_CONTROL_IS_ACTIVE,
         title_en: "Active",
@@ -203,6 +203,9 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 20] = [
         min: None,
         max: None,
     },
+];
+
+const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
     ControlSpec {
         name: MODEM_CONTROL_DISPLAYED_SMS_INDEX,
         title_en: "Displayed SMS, #",
@@ -348,26 +351,21 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 20] = [
         max: None,
     },
 ];
-const MODEM_BASE_CONTROL_COUNT: usize = 8;
 
 pub fn manager_control_specs() -> &'static [ControlSpec] {
     &MM_CONTROL_SPECS
 }
 
 pub fn modem_base_control_specs() -> &'static [ControlSpec] {
-    &MODEM_CONTROL_SPECS[..MODEM_BASE_CONTROL_COUNT]
+    &MODEM_BASE_CONTROL_SPECS
 }
 
 pub fn modem_sms_control_specs() -> &'static [ControlSpec] {
-    &MODEM_CONTROL_SPECS[MODEM_BASE_CONTROL_COUNT..]
-}
-
-pub fn modem_control_specs() -> &'static [ControlSpec] {
-    &MODEM_CONTROL_SPECS
+    &MODEM_SMS_CONTROL_SPECS
 }
 
 pub fn dynamic_message_select_spec(readonly: bool, max: u32) -> ControlSpec {
-    let base = MODEM_CONTROL_SPECS
+    let base = MODEM_SMS_CONTROL_SPECS
         .iter()
         .find(|spec| spec.name == MODEM_CONTROL_MESSAGE_SELECT)
         .expect("message_select control spec exists");
@@ -380,7 +378,7 @@ pub fn dynamic_message_select_spec(readonly: bool, max: u32) -> ControlSpec {
 }
 
 pub fn dynamic_delete_message_spec(readonly: bool) -> ControlSpec {
-    let base = MODEM_CONTROL_SPECS
+    let base = MODEM_SMS_CONTROL_SPECS
         .iter()
         .find(|spec| spec.name == MODEM_CONTROL_DELETE_MESSAGE)
         .expect("delete_message control spec exists");

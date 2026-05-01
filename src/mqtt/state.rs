@@ -7,6 +7,7 @@ use crate::dbus::ModemId;
 #[derive(Debug, Default)]
 pub(super) struct MqttSessionState {
     pub(super) main_device_created: bool,
+    pub(super) manager_available: bool,
     pub(super) modems: HashMap<ModemId, MqttModemState>,
     pub(super) reverse_modem_indices: HashMap<u32, ModemId>,
     pub(super) modem_sms_controls_created: HashSet<u32>,
@@ -17,6 +18,7 @@ pub(super) struct MqttSessionState {
 #[derive(Debug, Default)]
 pub(super) struct MqttModemState {
     pub(super) index: u32,
+    is_active: bool,
     pub(super) sms_state: Option<MqttModemSmsState>,
 }
 
@@ -52,6 +54,7 @@ impl MqttSessionState {
             modem_id.clone(),
             MqttModemState {
                 index: candidate,
+                is_active: false,
                 sms_state: None,
             },
         );
@@ -66,6 +69,22 @@ impl MqttSessionState {
         self.modem_sms_controls_created.remove(&modem_index);
         self.subscribed_modem_sms_controls.remove(&modem_index);
         Some(modem_index)
+    }
+
+    pub(super) fn modem_index(&self, modem_id: &ModemId) -> Option<u32> {
+        self.modems.get(modem_id).map(|modem| modem.index)
+    }
+
+    pub(super) fn modem_is_active(&self, modem_id: &ModemId) -> bool {
+        self.modems
+            .get(modem_id)
+            .is_some_and(|modem| modem.is_active)
+    }
+
+    pub(super) fn set_modem_active(&mut self, modem_id: &ModemId, is_active: bool) {
+        if let Some(modem) = self.modems.get_mut(modem_id) {
+            modem.is_active = is_active;
+        }
     }
 
     pub(super) fn modem_id_for_index(&self, modem_index: u32) -> Option<&ModemId> {
