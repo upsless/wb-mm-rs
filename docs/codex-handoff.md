@@ -37,6 +37,10 @@ stopped and runtime state dropped until MQTT reconnects.
 - Before any commit intended to be pushed to GitHub, review this handoff and
   update it if the commit changes project context, decisions, workflow, known
   issues, or next steps.
+- Read `docs/arcnotes.md` when resuming architecture work. It contains
+  user-owned design notes that may not yet be reflected in implementation;
+  notes must stay as exact numbered quotes unless the user explicitly says
+  otherwise.
 - Do not commit or push after any "commit only if I confirm" style instruction
   until the user explicitly grants that permission later.
 - Preserve old `wb-mm-mqtt` Last Will semantics: if the daemon dies,
@@ -237,6 +241,9 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 
 - `AGENTS.md` - agent/project rules.
 - `docs/architecture.md` - architecture notes.
+- `docs/arcnotes.md` - user-owned architecture notes. Read it during handoff
+  recovery, but do not modify it unless the user explicitly asks. Notes are
+  stored as exact numbered quotes.
 - `docs/dev-workflow.md` - machine/Git workflow.
 - `docs/reference-wb-mm.md` - reference project notes and findings.
 - `src/exchange.rs` - DBus/MQTT/tresher event and command vocabulary.

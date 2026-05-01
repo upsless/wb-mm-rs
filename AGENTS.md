@@ -32,6 +32,10 @@ ModemManager integration.
 - Before any commit intended to be pushed to GitHub, review
   `docs/codex-handoff.md` and update it if the commit changes project context,
   decisions, workflow, known issues, or next steps.
+- Do not modify `docs/arcnotes.md` unless the user explicitly asks to change
+  that file. When adding notes there, preserve the user's text as an exact
+  quote in the same language, add notes sequentially with an ordinal number,
+  and do not rewrite previous notes.
 - After Rust code edits, run `cargo fmt --check`, `cargo clippy`, and
   `cargo test` where applicable.
 - Do not change the Wiren Board MQTT topic schema unless explicitly requested.
