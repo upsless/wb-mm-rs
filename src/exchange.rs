@@ -17,6 +17,7 @@ pub enum DbusEvent {
         state: Option<String>,
         primary_sim_slot: Option<u32>,
         operator_name: Option<String>,
+        own_numbers: Vec<String>,
         signal_quality: Option<u32>,
     },
     ModemUpdated {
@@ -66,6 +67,7 @@ pub enum MqttCommand {
         state: Option<String>,
         primary_sim_slot: Option<u32>,
         operator_name: Option<String>,
+        own_numbers: Vec<String>,
         signal_quality: Option<u32>,
     },
     ModemUpdated {

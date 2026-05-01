@@ -39,8 +39,9 @@ stopped and runtime state dropped until MQTT reconnects.
   issues, or next steps.
 - Read `docs/arcnotes.md` when resuming architecture work. It contains
   user-owned design notes that may not yet be reflected in implementation;
-  notes must stay as exact numbered quotes unless the user explicitly says
-  otherwise.
+  notes must stay as exact numbered quotes unless the user explicitly asks for
+  a summary or another form. Use Russian by default unless another language is
+  requested.
 - Do not commit or push after any "commit only if I confirm" style instruction
   until the user explicitly grants that permission later.
 - Preserve old `wb-mm-mqtt` Last Will semantics: if the daemon dies,
@@ -138,9 +139,12 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   `Messages` changes before the modem reaches a stable usable state.
 - DBus emits one `SmsInventorySnapshot` with the ordered `sms_ids` and an
   optional `initial_sms_snapshot`, then live `SmsListChanged` updates.
-- The authoritative SMS order comes from the modem `Messages` property after
-  stripping `/org/freedesktop/ModemManager1/SMS/` and sorting by numeric short
-  ids.
+- Current implementation orders SMS ids from the modem `Messages` property by
+  numeric short DBus id. This is now known to be wrong for arrival order:
+  ModemManager/the modem may reuse the first free SMS number after deletion, so
+  a newly received SMS can appear in an older numeric slot. Rework SMS list
+  ordering according to `docs/arcnotes.md`: pull the receive timestamp for each
+  SMS and sort by real receive time instead of DBus short id.
 - Per-modem SMS controls are created lazily on the first SMS inventory command.
   Before that, SMS controls for the modem should not exist.
 - Empty SMS inventory after initialization publishes:
@@ -162,6 +166,10 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   - `delete_message` pushbutton for the currently displayed SMS.
 - Timestamp controls are published in pairs: visible text timestamp and hidden
   readonly `unixtime` payload for machine consumers.
+- Because DBus SMS numeric id is not a reliable "last received" criterion,
+  revisit `last_sms_dbus_id` before the SMS sorting rewrite. The likely UI
+  replacement is a visible "Last Received SMS Date" plus hidden unix-time
+  control, matching the selected-SMS timestamp pair.
 
 ### SMS Selection Rules
 
@@ -180,11 +188,12 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   cleanup and reselection.
 - When a new SMS list arrives:
   - update `sms_order`;
-  - if `displayed_sms_id` is still in the list, set `picked_sms_index` to that
-    SMS position and do not request a new snapshot;
-  - otherwise clamp the current `picked_sms_index`, compute the picked SMS id,
-    and request a snapshot if that picked id differs from current
-    `displayed_sms_id`;
+  - keep `picked_sms_index` as a positional user intent, clamped to the new
+    list bounds;
+  - compare the DBus id under the picked position before and after applying the
+    new list;
+  - request a new snapshot only when the picked DBus id changed and the new
+    picked id exists;
   - publish updated `message_select` and `displayed_sms_index` from state.
 - `displayed_sms_index` is now a real state-derived value: it is the current
   1-based position of `displayed_sms_id` inside `sms_order`, or `null` if the
@@ -211,11 +220,18 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - `displayed_sms_index` publishing moved into the general modem SMS sync path
   so the control is updated when the displayed SMS stays the same but moves to
   a different list position.
+- SMS list processing now treats `picked_sms_index` as positional intent:
+  `MqttModemSmsState::apply_sms_order()` requests a fresh snapshot only when
+  the picked DBus id changes after applying the new list.
+- MQTT SMS handlers now share `finish_synced_sms_change()` for the common tail
+  after modem SMS state has already been synced: make delete read-only while a
+  new snapshot is pending, optionally sync manager SMS count, and request the
+  needed snapshot.
 - Tests were moved out of `state.rs` into `src/mqtt/state/tests.rs`.
 - Latest local checks after these changes passed:
   - `cargo fmt --check`
   - `cargo clippy --all-targets --all-features`
-  - `cargo test` (20 tests)
+  - `cargo test` (21 tests)
 
 ## Live Verification Notes
 
@@ -226,6 +242,12 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - Initial SMS snapshot and MQTT-to-DBus selection flow were verified earlier.
 - Live SMS add/delete/change events still need verification on a working SIM;
   the current SIM was operator-blocked during previous testing.
+- On the A7600-style modem, `AT+CPMS="ME","ME","ME"` made the modem reboot and
+  then rediscover SMS received earlier today. Incoming SMS had been reported as
+  `Mobile` storage, but recent messages still disappeared across modem reboot
+  until this storage mode was explicitly selected. Need determine how to persist
+  or apply this setting cleanly, preferably through ModemManager if available;
+  otherwise consider a controlled AT command path.
 
 ## Known Reference Findings
 
@@ -243,7 +265,8 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - `docs/architecture.md` - architecture notes.
 - `docs/arcnotes.md` - user-owned architecture notes. Read it during handoff
   recovery, but do not modify it unless the user explicitly asks. Notes are
-  stored as exact numbered quotes.
+  stored as numbered Russian notes by default; exact quotes are preferred
+  unless the user asks for a summary.
 - `docs/dev-workflow.md` - machine/Git workflow.
 - `docs/reference-wb-mm.md` - reference project notes and findings.
 - `src/exchange.rs` - DBus/MQTT/tresher event and command vocabulary.
@@ -262,16 +285,43 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 
 ## Next Likely Work
 
-1. Continue reducing MQTT SMS handler complexity:
+1. Before mass SMS sorting changes, re-check the current initial inventory path:
+   `handle_sms_list()` syncs modem SMS controls before applying
+   `initial_sms_snapshot`, so it may briefly publish empty selected-SMS fields
+   and then immediately publish the real snapshot. Decide whether to collapse
+   this into one publish pass.
+2. Rework SMS sorting/list payloads according to `docs/arcnotes.md`:
+   - DBus SMS ids are not an arrival-order source because the modem can reuse
+     freed numeric slots;
+   - fetch/include each SMS receive timestamp when building list snapshots and
+     list-change events;
+   - keep MQTT picker semantics positional, but base positions on receive-time
+     order rather than DBus short id order.
+3. Replace or complement `last_sms_dbus_id` with "Last Received SMS Date" plus
+   hidden unix-time, because max DBus id is not the last-arrival marker.
+4. Figure out how to persist the SMS storage choice that worked manually:
+   `AT+CPMS="ME","ME","ME"` caused the modem to rediscover today's SMS after a
+   reboot-like transition, but the daemon should not rely on manual console
+   state.
+5. Continue reducing MQTT SMS handler complexity:
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-2. Re-check the stale `displayed_sms_id` policy after more cleanup:
+6. Split `MODEM_CONTROL_SPECS` into explicit base and SMS control arrays
+   instead of using `MODEM_BASE_CONTROL_COUNT`; this is less clever and safer
+   when controls are inserted or reordered.
+7. Re-check whether `MqttModemFoundPayload` is now a leftover from before
+   `MqttModemState`; it may be removable or better represented by state/domain
+   structures.
+8. Add an explicit guard for user `/on` topics while ModemManager is
+   unavailable. MQTT readonly metadata affects the UI, not direct publications
+   to `/on`.
+9. Re-check the stale `displayed_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
      also set `displayed_sms_id=None`.
-3. Verify live SMS add/delete/change behavior on a working SIM.
-4. Add focused tests around reconnect/lifecycle ordering where practical.
-5. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+10. Verify live SMS add/delete/change behavior on a working SIM.
+11. Add focused tests around reconnect/lifecycle ordering where practical.
+12. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.

@@ -14,6 +14,7 @@ pub const MODEM_CONTROL_REVISION: &str = "revision";
 pub const MODEM_CONTROL_STATE: &str = "state";
 pub const MODEM_CONTROL_PRIMARY_SIM_SLOT: &str = "primary_sim_slot";
 pub const MODEM_CONTROL_OPERATOR_NAME: &str = "operator_name";
+pub const MODEM_CONTROL_OWN_NUMBERS: &str = "own_numbers";
 pub const MODEM_CONTROL_SIGNAL_QUALITY: &str = "signal_quality";
 pub const MODEM_CONTROL_DISPLAYED_SMS_INDEX: &str = "displayed_sms_index";
 pub const MODEM_CONTROL_SMS_COUNT: &str = "sms_count";
@@ -23,6 +24,7 @@ pub const MODEM_CONTROL_SELECTED_SMS_DBUS_ID: &str = "selected_sms_dbus_id";
 pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP: &str = "selected_sms_timestamp";
 pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME: &str = "selected_sms_timestamp_unixtime";
 pub const MODEM_CONTROL_SELECTED_SMS_SENDER: &str = "selected_sms_sender";
+pub const MODEM_CONTROL_SELECTED_SMS_STORAGE: &str = "selected_sms_storage";
 pub const MODEM_CONTROL_SELECTED_SMS_TEXT: &str = "selected_sms_text";
 pub const MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED: &str = "selected_sms_is_received";
 pub const MODEM_CONTROL_DELETE_MESSAGE: &str = "delete_message";
@@ -35,6 +37,7 @@ pub struct ControlSpec {
     pub order: u32,
     pub control_type: &'static str,
     pub readonly: bool,
+    pub hidden: bool,
     pub units: Option<&'static str>,
     pub min: Option<u32>,
     pub max: Option<u32>,
@@ -48,6 +51,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
         order: 0,
         control_type: "switch",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -59,6 +63,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
         order: 1,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -70,6 +75,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
         order: 2,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -81,6 +87,7 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
         order: 3,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -92,13 +99,14 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
         order: 4,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
     },
 ];
 
-const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
+const MODEM_CONTROL_SPECS: [ControlSpec; 20] = [
     ControlSpec {
         name: MODEM_CONTROL_IS_ACTIVE,
         title_en: "Active",
@@ -106,6 +114,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 10,
         control_type: "switch",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -117,6 +126,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 11,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -128,6 +138,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 12,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -139,6 +150,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 13,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -150,6 +162,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 14,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -161,6 +174,19 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 15,
         control_type: "text",
         readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_OWN_NUMBERS,
+        title_en: "Numbers",
+        title_ru: "Номера",
+        order: 16,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -169,9 +195,10 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         name: MODEM_CONTROL_SIGNAL_QUALITY,
         title_en: "Signal quality",
         title_ru: "Уровень сигнала",
-        order: 16,
+        order: 17,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: Some("%"),
         min: None,
         max: None,
@@ -183,6 +210,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 21,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -194,6 +222,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 18,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -205,6 +234,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 19,
         control_type: "value",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -216,6 +246,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 20,
         control_type: "range",
         readonly: true,
+        hidden: false,
         units: None,
         min: Some(1),
         max: Some(1),
@@ -227,6 +258,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 25,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -238,6 +270,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 22,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -249,6 +282,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 23,
         control_type: "unixtime",
         readonly: true,
+        hidden: true,
         units: None,
         min: None,
         max: None,
@@ -260,6 +294,7 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         order: 24,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -268,9 +303,10 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         name: MODEM_CONTROL_SELECTED_SMS_TEXT,
         title_en: "SMS text",
         title_ru: "Текст СМС",
-        order: 27,
+        order: 28,
         control_type: "text",
         readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -279,9 +315,22 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         name: MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
         title_en: "SMS received fully",
         title_ru: "СМС получена полностью",
-        order: 26,
+        order: 27,
         control_type: "switch",
         readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SELECTED_SMS_STORAGE,
+        title_en: "SMS storage",
+        title_ru: "Хранилище СМС",
+        order: 26,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
         units: None,
         min: None,
         max: None,
@@ -290,15 +339,16 @@ const MODEM_CONTROL_SPECS: [ControlSpec; 18] = [
         name: MODEM_CONTROL_DELETE_MESSAGE,
         title_en: "Delete current SMS",
         title_ru: "Удалить текущую СМС",
-        order: 28,
+        order: 29,
         control_type: "pushbutton",
         readonly: false,
+        hidden: false,
         units: None,
         min: None,
         max: None,
     },
 ];
-const MODEM_BASE_CONTROL_COUNT: usize = 7;
+const MODEM_BASE_CONTROL_COUNT: usize = 8;
 
 pub fn manager_control_specs() -> &'static [ControlSpec] {
     &MM_CONTROL_SPECS
@@ -468,7 +518,7 @@ pub fn control_meta_payload(spec: &ControlSpec) -> String {
         fields.push(format!(r#""max":{max}"#));
     }
 
-    if is_hidden_control(spec) {
+    if spec.hidden {
         fields.push(r#""hidden":true"#.to_string());
     }
 
@@ -494,15 +544,43 @@ pub fn control_meta_leaf_payloads(spec: &ControlSpec) -> Vec<(&'static str, Stri
         fields.push(("max", max.to_string()));
     }
 
-    if is_hidden_control(spec) {
+    if spec.hidden {
         fields.push(("hidden", bool_payload(true).to_string()));
     }
 
     fields
 }
 
-fn is_hidden_control(spec: &ControlSpec) -> bool {
-    spec.control_type == "unixtime"
+pub fn string_array_payload(values: &[String]) -> String {
+    let mut payload = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            payload.push(',');
+        }
+        push_json_string(&mut payload, value);
+    }
+    payload.push(']');
+    payload
+}
+
+fn push_json_string(payload: &mut String, value: &str) {
+    payload.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => payload.push_str("\\\""),
+            '\\' => payload.push_str("\\\\"),
+            '\n' => payload.push_str("\\n"),
+            '\r' => payload.push_str("\\r"),
+            '\t' => payload.push_str("\\t"),
+            '\u{08}' => payload.push_str("\\b"),
+            '\u{0C}' => payload.push_str("\\f"),
+            character if character <= '\u{1F}' => {
+                payload.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => payload.push(character),
+        }
+    }
+    payload.push('"');
 }
 
 pub fn device_meta_topic(device_name: &str) -> String {

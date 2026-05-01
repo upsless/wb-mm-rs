@@ -43,26 +43,42 @@ fn sms_order_keeps_picked_index_not_dbus_id() {
 }
 
 #[test]
-fn sms_order_keeps_displayed_sms_selected_by_id() {
+fn sms_order_keeps_picked_position_when_displayed_sms_moves() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
-        picked_sms_index: 1,
+        picked_sms_index: 2,
         displayed_sms_id: Some(SmsId("145".to_string())),
     };
 
     let picked_sms_id = state.apply_sms_order(sms_ids(&["146", "144", "145"]));
 
-    assert_eq!(picked_sms_id, Some(SmsId("145".to_string())));
-    assert_eq!(state.picked_sms_index, 3);
-    assert_eq!(state.picked_sms_id(), Some(&SmsId("145".to_string())));
+    assert_eq!(picked_sms_id, Some(SmsId("144".to_string())));
+    assert_eq!(state.picked_sms_index, 2);
+    assert_eq!(state.picked_sms_id(), Some(&SmsId("144".to_string())));
     assert_eq!(state.displayed_sms_index(), Some(3));
 }
 
 #[test]
-fn sms_order_requests_snapshot_when_displayed_sms_disappears() {
+fn sms_order_does_not_request_when_picked_sms_id_survives() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 3,
+        displayed_sms_id: Some(SmsId("145".to_string())),
+    };
+
+    let picked_sms_id = state.apply_sms_order(sms_ids(&["144", "146"]));
+
+    assert_eq!(picked_sms_id, None);
+    assert_eq!(state.picked_sms_index, 2);
+    assert_eq!(state.picked_sms_id(), Some(&SmsId("146".to_string())));
+    assert_eq!(state.displayed_sms_index(), None);
+}
+
+#[test]
+fn sms_order_requests_snapshot_when_picked_sms_id_changes() {
+    let mut state = MqttModemSmsState {
+        sms_order: sms_ids(&["144", "145", "146"]),
+        picked_sms_index: 2,
         displayed_sms_id: Some(SmsId("145".to_string())),
     };
 
@@ -72,7 +88,6 @@ fn sms_order_requests_snapshot_when_displayed_sms_disappears() {
     assert_eq!(state.picked_sms_index, 2);
     assert_eq!(state.picked_sms_id(), Some(&SmsId("146".to_string())));
     assert_eq!(state.displayed_sms_index(), None);
-    assert_ne!(state.displayed_sms_id(), picked_sms_id.as_ref());
 }
 
 #[test]
@@ -252,6 +267,7 @@ fn sms_snapshot(sms_id: &str) -> SmsSnapshot {
     SmsSnapshot {
         sms_id: SmsId(sms_id.to_string()),
         is_received: true,
+        storage: "SIM".to_string(),
         timestamp: Some(OffsetDateTime::UNIX_EPOCH),
         number: Some("+70000000000".to_string()),
         text: Some("message".to_string()),

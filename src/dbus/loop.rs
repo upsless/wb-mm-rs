@@ -666,6 +666,9 @@ async fn run_modem_task(
     let mut signal_quality_changes = modem_proxy
         .receive_property_changed::<(u32, bool)>("SignalQuality")
         .await;
+    let mut own_numbers_changes = modem_proxy
+        .receive_property_changed::<Vec<String>>("OwnNumbers")
+        .await;
     let mut sim_changes = modem_proxy
         .receive_property_changed::<OwnedObjectPath>("Sim")
         .await;
@@ -691,6 +694,7 @@ async fn run_modem_task(
             state: snapshot.state.clone(),
             primary_sim_slot: snapshot.primary_sim_slot,
             operator_name: snapshot.operator_name.clone(),
+            own_numbers: snapshot.own_numbers.clone(),
             signal_quality: snapshot.signal_quality,
         },
     )
@@ -829,6 +833,22 @@ async fn run_modem_task(
                         &event_tx,
                         &modem_id,
                         logics::ModemUpdate::SignalQuality(signal_quality),
+                    )
+                    .await;
+                }
+            }
+            change = own_numbers_changes.next() => {
+                let Some(change) = change else { break; };
+                let own_numbers = change
+                    .get()
+                    .await
+                    .context("failed to read modem OwnNumbers property change")?;
+                if snapshot.own_numbers != own_numbers {
+                    snapshot.own_numbers = own_numbers.clone();
+                    emit_modem_update(
+                        &event_tx,
+                        &modem_id,
+                        logics::ModemUpdate::OwnNumbers(own_numbers),
                     )
                     .await;
                 }
@@ -1136,6 +1156,7 @@ async fn run_sms_task(
         .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
 
     let mut state_changes = sms_proxy.receive_property_changed::<u32>("State").await;
+    let mut storage_changes = sms_proxy.receive_property_changed::<u32>("Storage").await;
     let mut timestamp_changes = sms_proxy
         .receive_property_changed::<String>("Timestamp")
         .await;
@@ -1162,6 +1183,29 @@ async fn run_sms_task(
                         &modem_id,
                         &sms_id,
                         logics::SmsPropertyChange::IsReceived(is_received),
+                    )
+                    .await;
+                }
+            }
+            change = storage_changes.next() => {
+                let Some(change) = change else {
+                    debug!(target: LOG_TARGET, "{}", logics::sms_signal_stream_closed_message(logics::MM_SMS_STORAGE_CHANGED_SIGNAL_ID, &sms_path));
+                    break;
+                };
+                let storage = logics::sms_storage_name(
+                    change
+                        .get()
+                        .await
+                        .context("failed to read SMS Storage property change")?,
+                )
+                .to_string();
+                if snapshot.storage != storage {
+                    snapshot.storage = storage.clone();
+                    emit_sms_property_change(
+                        &event_tx,
+                        &modem_id,
+                        &sms_id,
+                        logics::SmsPropertyChange::Storage(storage),
                     )
                     .await;
                 }
@@ -1294,13 +1338,15 @@ struct TrackedModemState {
     state: Option<String>,
     primary_sim_slot: Option<u32>,
     operator_name: Option<String>,
+    own_numbers: Vec<String>,
     signal_quality: Option<u32>,
 }
 
 impl TrackedModemState {
     fn summary(&self) -> String {
+        let own_numbers = format!("[{}]", self.own_numbers.join(","));
         format!(
-            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, signal_quality={}",
+            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, own_numbers={}, signal_quality={}",
             self.is_active,
             self.model.as_deref().unwrap_or("None"),
             self.revision.as_deref().unwrap_or("None"),
@@ -1309,6 +1355,7 @@ impl TrackedModemState {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "None".to_string()),
             self.operator_name.as_deref().unwrap_or("None"),
+            own_numbers,
             self.signal_quality
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "None".to_string()),
@@ -1345,6 +1392,10 @@ async fn query_modem_snapshot(
         .get_property("SignalQuality")
         .await
         .context("failed to read modem SignalQuality property")?;
+    let own_numbers: Vec<String> = modem_proxy
+        .get_property("OwnNumbers")
+        .await
+        .context("failed to read modem OwnNumbers property")?;
     let sim_path: OwnedObjectPath = modem_proxy
         .get_property("Sim")
         .await
@@ -1358,6 +1409,7 @@ async fn query_modem_snapshot(
             state: Some(logics::modem_state_name(state).to_string()),
             primary_sim_slot: Some(primary_sim_slot),
             operator_name: query_operator_name(connection, sim_path).await?,
+            own_numbers,
             signal_quality: Some(signal_quality.0),
         },
         raw_state: state,
@@ -1404,6 +1456,10 @@ async fn query_sms_snapshot(
         .get_property("State")
         .await
         .context("failed to read SMS State property")?;
+    let storage: u32 = sms_proxy
+        .get_property("Storage")
+        .await
+        .context("failed to read SMS Storage property")?;
     let timestamp: String = sms_proxy
         .get_property("Timestamp")
         .await
@@ -1420,6 +1476,7 @@ async fn query_sms_snapshot(
     Ok(Some(logics::SmsSnapshot {
         sms_id: sms_id.clone(),
         is_received: logics::sms_is_received(state),
+        storage: logics::sms_storage_name(storage).to_string(),
         timestamp: logics::parse_sms_timestamp(&timestamp),
         number: normalize_string(number),
         text: normalize_string(text),

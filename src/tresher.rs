@@ -82,6 +82,7 @@ async fn route_dbus_event(
             state,
             primary_sim_slot,
             operator_name,
+            own_numbers,
             signal_quality,
         } => {
             send_to_mqtt(
@@ -94,6 +95,7 @@ async fn route_dbus_event(
                     state,
                     primary_sim_slot,
                     operator_name,
+                    own_numbers,
                     signal_quality,
                 },
             )

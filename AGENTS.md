@@ -34,8 +34,10 @@ ModemManager integration.
   decisions, workflow, known issues, or next steps.
 - Do not modify `docs/arcnotes.md` unless the user explicitly asks to change
   that file. When adding notes there, preserve the user's text as an exact
-  quote in the same language, add notes sequentially with an ordinal number,
-  and do not rewrite previous notes.
+  quote in the same language unless the user explicitly asks for a summary or
+  another form. Add notes sequentially with an ordinal number, do not rewrite
+  previous notes, and use Russian by default unless the user specifies another
+  language.
 - After Rust code edits, run `cargo fmt --check`, `cargo clippy`, and
   `cargo test` where applicable.
 - Do not change the Wiren Board MQTT topic schema unless explicitly requested.

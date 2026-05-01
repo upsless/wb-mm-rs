@@ -95,15 +95,16 @@ impl MqttModemSmsState {
     }
 
     pub(super) fn apply_sms_order(&mut self, sms_order: Vec<SmsId>) -> Option<SmsId> {
-        self.sms_order = sms_order;
-        if let Some(displayed_sms_index) = self.displayed_sms_index() {
-            self.picked_sms_index = displayed_sms_index;
-            return self.displayed_sms_id.clone();
-        }
+        let old_picked_sms_id = self.picked_sms_id().cloned();
 
+        self.sms_order = sms_order;
         self.picked_sms_index =
             clamp_message_select_index(self.picked_sms_index, self.sms_order.len());
-        self.picked_sms_id().cloned()
+
+        let picked_sms_id = self.picked_sms_id().cloned();
+        (old_picked_sms_id != picked_sms_id)
+            .then_some(picked_sms_id)
+            .flatten()
     }
 
     pub(super) fn remove_sms(&mut self, sms_id: &SmsId) -> Option<SmsId> {

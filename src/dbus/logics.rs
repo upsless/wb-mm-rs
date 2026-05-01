@@ -64,6 +64,7 @@ pub const MM_SMS_STATE_CHANGED_SIGNAL_ID: &str = "mm_sms_state_changed";
 pub const MM_SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
 pub const MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
 pub const MM_SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
+pub const MM_SMS_STORAGE_CHANGED_SIGNAL_ID: &str = "mm_sms_storage_changed";
 
 /// DBus availability state derived from the ModemManager service name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +108,7 @@ pub enum ModemUpdate {
     State(Option<String>),
     PrimarySimSlot(u32),
     OperatorName(Option<String>),
+    OwnNumbers(Vec<String>),
     SignalQuality(Option<u32>),
 }
 
@@ -123,6 +125,7 @@ impl ModemUpdate {
             ModemUpdate::OperatorName(value) => {
                 format!("operator_name={}", format_option_string(value.as_deref()))
             }
+            ModemUpdate::OwnNumbers(value) => format!("own_numbers={}", format_string_array(value)),
             ModemUpdate::SignalQuality(value) => {
                 format!("signal_quality={}", format_option_u32(*value))
             }
@@ -135,6 +138,7 @@ impl ModemUpdate {
 pub struct SmsSnapshot {
     pub sms_id: SmsId,
     pub is_received: bool,
+    pub storage: String,
     pub timestamp: Option<OffsetDateTime>,
     pub number: Option<String>,
     pub text: Option<String>,
@@ -143,9 +147,10 @@ pub struct SmsSnapshot {
 impl SmsSnapshot {
     pub fn summary(&self) -> String {
         format!(
-            "sms_id={}, is_received={}, timestamp={}, sender={}, text={}",
+            "sms_id={}, is_received={}, storage={}, timestamp={}, sender={}, text={}",
             self.sms_id.0,
             self.is_received,
+            self.storage,
             format_option_timestamp(self.timestamp),
             format_option_string(self.number.as_deref()),
             format_text_summary(self.text.as_deref()),
@@ -170,6 +175,7 @@ impl SmsUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmsPropertyChange {
     IsReceived(bool),
+    Storage(String),
     Timestamp(Option<OffsetDateTime>),
     Number(Option<String>),
     Text(Option<String>),
@@ -179,6 +185,7 @@ impl SmsPropertyChange {
     pub fn summary(&self) -> String {
         match self {
             SmsPropertyChange::IsReceived(value) => format!("is_received={value}"),
+            SmsPropertyChange::Storage(value) => format!("storage={value}"),
             SmsPropertyChange::Timestamp(value) => {
                 format!("timestamp={}", format_option_timestamp(*value))
             }
@@ -200,6 +207,10 @@ fn format_option_u32(value: Option<u32>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "None".to_string())
+}
+
+fn format_string_array(values: &[String]) -> String {
+    format!("[{}]", values.join(","))
 }
 
 fn format_option_timestamp(value: Option<OffsetDateTime>) -> String {
@@ -305,6 +316,19 @@ pub fn modem_state_allows_sms_inventory(state: i32) -> bool {
 
 pub fn modem_state_is_active(state: i32) -> bool {
     matches!(state, 6..=11)
+}
+
+pub fn sms_storage_name(storage: u32) -> &'static str {
+    match storage {
+        0 => "unknown",
+        1 => "SIM",
+        2 => "Mobile",
+        3 => "SIM + Mobile",
+        4 => "Status",
+        5 => "Broadcast",
+        6 => "Terminal",
+        _ => "unknown",
+    }
 }
 
 pub fn modem_deleted_message(modem_id: &ModemId) -> String {

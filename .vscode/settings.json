@@ -1,0 +1,5 @@
+{
+    "chatgpt.runCodexInWindowsSubsystemForLinux": true,
+    "chatgpt.openOnStartup": true,
+    "chatgpt.followUpQueueMode": "steer"
+}
