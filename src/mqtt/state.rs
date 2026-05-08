@@ -1,18 +1,14 @@
 use crate::dbus::{SmsId, SmsSnapshot};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::dbus::ModemId;
 
 #[derive(Debug, Default)]
 pub(super) struct MqttSessionState {
-    pub(super) main_device_created: bool,
     pub(super) manager_available: bool,
     pub(super) modems: HashMap<ModemId, MqttModemState>,
     pub(super) reverse_modem_indices: HashMap<u32, ModemId>,
-    pub(super) modem_sms_controls_created: HashSet<u32>,
-    pub(super) subscribed_modem_sms_controls: HashSet<u32>,
-    pub(super) last_manager_sms_count: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -66,8 +62,6 @@ impl MqttSessionState {
     pub(super) fn remove_modem_index(&mut self, modem_id: &ModemId) -> Option<u32> {
         let modem_index = self.modems.remove(modem_id)?.index;
         self.reverse_modem_indices.remove(&modem_index);
-        self.modem_sms_controls_created.remove(&modem_index);
-        self.subscribed_modem_sms_controls.remove(&modem_index);
         Some(modem_index)
     }
 

@@ -99,6 +99,39 @@ impl ManagerUpdate {
     }
 }
 
+/// Current modem description shared between DBus discovery and MQTT publishing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModemInfo {
+    pub is_active: bool,
+    pub model: Option<String>,
+    pub revision: Option<String>,
+    pub state: Option<String>,
+    pub primary_sim_slot: Option<u32>,
+    pub operator_name: Option<String>,
+    pub own_numbers: Vec<String>,
+    pub signal_quality: Option<u32>,
+}
+
+impl ModemInfo {
+    pub fn summary(&self) -> String {
+        format!(
+            "is_active={}, model={}, revision={}, state={}, primary_sim_slot={}, operator_name={}, own_numbers={}, signal_quality={}",
+            self.is_active,
+            self.model.as_deref().unwrap_or("None"),
+            self.revision.as_deref().unwrap_or("None"),
+            self.state.as_deref().unwrap_or("None"),
+            self.primary_sim_slot
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "None".to_string()),
+            self.operator_name.as_deref().unwrap_or("None"),
+            format_string_array(&self.own_numbers),
+            self.signal_quality
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "None".to_string()),
+        )
+    }
+}
+
 /// Single modem-property update emitted from live DBus property changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModemUpdate {

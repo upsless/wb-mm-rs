@@ -550,35 +550,7 @@ pub fn control_meta_leaf_payloads(spec: &ControlSpec) -> Vec<(&'static str, Stri
 }
 
 pub fn string_array_payload(values: &[String]) -> String {
-    let mut payload = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            payload.push(',');
-        }
-        push_json_string(&mut payload, value);
-    }
-    payload.push(']');
-    payload
-}
-
-fn push_json_string(payload: &mut String, value: &str) {
-    payload.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => payload.push_str("\\\""),
-            '\\' => payload.push_str("\\\\"),
-            '\n' => payload.push_str("\\n"),
-            '\r' => payload.push_str("\\r"),
-            '\t' => payload.push_str("\\t"),
-            '\u{08}' => payload.push_str("\\b"),
-            '\u{0C}' => payload.push_str("\\f"),
-            character if character <= '\u{1F}' => {
-                payload.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => payload.push(character),
-        }
-    }
-    payload.push('"');
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn device_meta_topic(device_name: &str) -> String {

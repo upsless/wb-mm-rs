@@ -1,4 +1,4 @@
-use crate::dbus::{ManagerUpdate, ModemId, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate};
+use crate::dbus::{ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate};
 
 /// Events emitted by the DBus loop and consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,14 +11,7 @@ pub enum DbusEvent {
     ManagerDeleted,
     ModemFound {
         modem_id: ModemId,
-        is_active: bool,
-        model: Option<String>,
-        revision: Option<String>,
-        state: Option<String>,
-        primary_sim_slot: Option<u32>,
-        operator_name: Option<String>,
-        own_numbers: Vec<String>,
-        signal_quality: Option<u32>,
+        info: ModemInfo,
     },
     ModemUpdated {
         modem_id: ModemId,
@@ -61,14 +54,7 @@ pub enum MqttCommand {
     ManagerDeleted,
     ModemFound {
         modem_id: ModemId,
-        is_active: bool,
-        model: Option<String>,
-        revision: Option<String>,
-        state: Option<String>,
-        primary_sim_slot: Option<u32>,
-        operator_name: Option<String>,
-        own_numbers: Vec<String>,
-        signal_quality: Option<u32>,
+        info: ModemInfo,
     },
     ModemUpdated {
         modem_id: ModemId,

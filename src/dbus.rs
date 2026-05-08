@@ -8,8 +8,8 @@ use tokio::sync::watch;
 use crate::exchange::{DbusCommand, DbusEvent};
 
 pub use logics::{
-    ManagerUpdate, ModemId, ModemManagerStatus, ModemUpdate, SmsId, SmsPropertyChange, SmsSnapshot,
-    SmsUpdate, format_timestamp_for_wb,
+    ManagerUpdate, ModemId, ModemInfo, ModemManagerStatus, ModemUpdate, SmsId, SmsPropertyChange,
+    SmsSnapshot, SmsUpdate, format_timestamp_for_wb,
 };
 
 pub async fn run(

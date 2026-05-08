@@ -3,6 +3,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::exchange::{DbusCommand, DbusEvent, MqttCommand, MqttEvent};
+use crate::shutdown::wait_for_shutdown;
 
 const LOG_TARGET: &str = "DISP";
 
@@ -74,32 +75,8 @@ async fn route_dbus_event(
         DbusEvent::ManagerDeleted => {
             send_to_mqtt(mqtt_message_tx, MqttCommand::ManagerDeleted).await?;
         }
-        DbusEvent::ModemFound {
-            modem_id,
-            is_active,
-            model,
-            revision,
-            state,
-            primary_sim_slot,
-            operator_name,
-            own_numbers,
-            signal_quality,
-        } => {
-            send_to_mqtt(
-                mqtt_message_tx,
-                MqttCommand::ModemFound {
-                    modem_id,
-                    is_active,
-                    model,
-                    revision,
-                    state,
-                    primary_sim_slot,
-                    operator_name,
-                    own_numbers,
-                    signal_quality,
-                },
-            )
-            .await?;
+        DbusEvent::ModemFound { modem_id, info } => {
+            send_to_mqtt(mqtt_message_tx, MqttCommand::ModemFound { modem_id, info }).await?;
         }
         DbusEvent::ModemUpdated { modem_id, update } => {
             send_to_mqtt(
@@ -205,16 +182,4 @@ async fn send_to_dbus(
     }
 
     Ok(())
-}
-
-async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()> {
-    loop {
-        if *shutdown_rx.borrow() {
-            return Ok(());
-        }
-
-        if shutdown_rx.changed().await.is_err() {
-            return Ok(());
-        }
-    }
 }

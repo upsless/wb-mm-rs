@@ -2,6 +2,7 @@ mod cli;
 mod dbus;
 mod exchange;
 mod mqtt;
+mod shutdown;
 mod tresher;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,7 @@ use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
+use crate::shutdown::wait_for_shutdown;
 
 const DBUS_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const DBUS_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
@@ -317,18 +319,6 @@ async fn sleep_until_retry_or_shutdown(
             Ok(true)
         }
         _ = sleep(delay) => Ok(false),
-    }
-}
-
-async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) -> Result<()> {
-    loop {
-        if *shutdown_rx.borrow() {
-            return Ok(());
-        }
-
-        if shutdown_rx.changed().await.is_err() {
-            return Ok(());
-        }
     }
 }
 

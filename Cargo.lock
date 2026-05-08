@@ -1434,6 +1434,7 @@ dependencies = [
  "clap",
  "futures-util",
  "rumqttc",
+ "serde_json",
  "time",
  "tokio",
  "tracing",
