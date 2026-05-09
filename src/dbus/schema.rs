@@ -1,5 +1,7 @@
 use time::{OffsetDateTime, format_description::well_known::Iso8601};
 
+pub const LOG_TARGET: &str = "DBUS";
+
 /// Well-known DBus service name used by ModemManager.
 pub const DBUS_BUS_NAME: &str = "org.freedesktop.DBus";
 pub const DBUS_OBJ_PATH: &str = "/org/freedesktop/DBus";
@@ -60,6 +62,8 @@ pub const MM_INTERFACES_REMOVED_SIGNAL: DbusSignalSpec = DbusSignalSpec {
     member: "InterfacesRemoved",
 };
 
+// SMS objects have dynamic DBus paths (`.../SMS/<id>`), so these constants are
+// log identifiers rather than full static `DbusSignalSpec` values.
 pub const MM_SMS_STATE_CHANGED_SIGNAL_ID: &str = "mm_sms_state_changed";
 pub const MM_SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
 pub const MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
@@ -259,17 +263,9 @@ fn format_text_summary(value: Option<&str>) -> String {
     }
 }
 
-pub fn dbus_connected_message() -> &'static str {
-    "Connection established"
-}
-
-pub fn dbus_stopped_before_connect_message() -> &'static str {
-    "Stopped before connection was established"
-}
-
-pub fn dbus_stopped_message() -> &'static str {
-    "Connection closed"
-}
+pub const DBUS_CONNECTED_MESSAGE: &str = "Connection established";
+pub const DBUS_STOPPED_BEFORE_CONNECT_MESSAGE: &str = "Stopped before connection was established";
+pub const DBUS_STOPPED_MESSAGE: &str = "Connection closed";
 
 pub fn dbus_signal_stream_closed_message(signal: DbusSignalSpec) -> String {
     format!(
@@ -341,10 +337,6 @@ pub fn modem_state_name(state: i32) -> &'static str {
         11 => "connected",
         _ => "unknown",
     }
-}
-
-pub fn modem_state_allows_sms_inventory(state: i32) -> bool {
-    modem_state_is_active(state)
 }
 
 pub fn modem_state_is_active(state: i32) -> bool {

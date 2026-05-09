@@ -56,7 +56,7 @@ stopped and runtime state dropped until MQTT reconnects.
 - Do not change the MQTT topic schema unless the user explicitly asks.
 - Keep DBus destination, path, interface, member, and error context explicit.
 - Keep mapping modules compact and reviewable. Current naming:
-  `src/dbus/logics.rs` for DBus/domain mapping helpers and
+  `src/dbus/schema.rs` for DBus/domain mapping helpers and
   `src/mqtt/schema.rs` for MQTT topic/control schema helpers.
 - Production logs should stay quiet: startup, shutdown, important state
   transitions, and unrecoverable conditions. Debug logs can be more detailed.
@@ -84,6 +84,19 @@ stopped and runtime state dropped until MQTT reconnects.
 - MQTT-facing modem numbering starts from `1` even when DBus modem ids start
   from `0`. DBus ids stay internal; MQTT device names are user-facing, e.g.
   `mm_modem_1`.
+- DBus manager-level runtime is now split out of the outer loop:
+  - `src/dbus/connection.rs` owns DBus connection setup, the top-level select
+    loop, and shutdown/command-channel integration;
+  - `src/dbus/runtime.rs` owns the DBus-specific `DbusRuntime`: the
+    `org.freedesktop.DBus` proxy, ModemManager owner-change subscription, and
+    the embedded `ManagerWatcher`;
+  - `src/dbus/manager.rs` owns ModemManager-specific state and logic:
+    manager presence, active manager streams, modem watcher collection, and
+    manager-level command/event handling;
+  - `src/dbus/modem.rs` owns modem/SMS watchers, modem/SMS DBus proxy work, and
+    DBus commands for SMS refresh/delete;
+  - `src/dbus/schema.rs` replaced the old `src/dbus/logics.rs` name and holds
+    DBus/domain vocabulary, mappings, parsers, and log message helpers.
 
 ## Current Exchange Vocabulary
 
@@ -285,10 +298,16 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - `docs/dev-workflow.md` - machine/Git workflow.
 - `docs/reference-wb-mm.md` - reference project notes and findings.
 - `src/exchange.rs` - DBus/MQTT/tresher event and command vocabulary.
-- `src/dbus/logics.rs` - DBus/domain ids, snapshots, updates, parsers, and log
+- `src/dbus/schema.rs` - DBus/domain ids, snapshots, updates, parsers, and log
   message helpers.
-- `src/dbus/loop.rs` - DBus runtime, ModemManager discovery, SMS watchers, and
-  method calls.
+- `src/dbus/connection.rs` - DBus connection, top-level select loop,
+  and shutdown/command-channel integration.
+- `src/dbus/runtime.rs` - DBus-specific runtime wrapper: DBus proxy,
+  ModemManager owner/status stream, and delegation into manager logic.
+- `src/dbus/manager.rs` - ModemManager-specific state, streams, activation,
+  modem collection, and manager-level command/event handling.
+- `src/dbus/modem.rs` - modem/SMS watchers, modem/SMS proxy setup, SMS
+  inventory and tracked-SMS streams, and SMS refresh/delete DBus commands.
 - `src/mqtt/schema.rs` - MQTT device/control schema, topic builders, metadata,
   and log message helpers.
 - `src/mqtt/state.rs` - MQTT session, modem, and SMS state machines.
@@ -303,54 +322,61 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 
 ## Next Likely Work
 
-1. Shorten the large `tokio::select!` in `src/dbus/loop.rs` gradually:
-   - first extract small "read next signal" helpers for version,
-     InterfacesAdded, and InterfacesRemoved;
-   - only then decide whether result handling should move out too;
-   - avoid replacing the current code with heavier `&mut Option<...>`
-     signatures that obscure ownership.
-2. Decompose `run_modem_task()` after the registry cleanup:
+1. Systematize `src/dbus/modem.rs` after the mechanical extraction:
    - separate proxy/stream initialization;
    - separate modem property change handling;
    - separate SMS inventory task start/stop/retarget logic.
-3. Before mass SMS sorting changes, re-check the current initial inventory path:
+2. Before mass SMS sorting changes, re-check the current initial inventory path:
    `handle_sms_list()` syncs modem SMS controls before applying
    `initial_sms_snapshot`, so it may briefly publish empty selected-SMS fields
    and then immediately publish the real snapshot. Decide whether to collapse
    this into one publish pass.
-4. Rework SMS sorting/list payloads according to `docs/arcnotes.md`:
+3. Rework SMS sorting/list payloads according to `docs/arcnotes.md`:
    - DBus SMS ids are not an arrival-order source because the modem can reuse
      freed numeric slots;
    - fetch/include each SMS receive timestamp when building list snapshots and
      list-change events;
    - keep MQTT picker semantics positional, but base positions on receive-time
      order rather than DBus short id order.
-5. Replace or complement `last_sms_dbus_id` with "Last Received SMS Date" plus
+4. Replace or complement `last_sms_dbus_id` with "Last Received SMS Date" plus
    hidden unix-time, because max DBus id is not the last-arrival marker.
-6. Figure out how to persist the SMS storage choice that worked manually:
+5. Figure out how to persist the SMS storage choice that worked manually:
    `AT+CPMS="ME","ME","ME"` caused the modem to rediscover today's SMS after a
    reboot-like transition, but the daemon should not rely on manual console
    state.
-7. Continue reducing MQTT SMS handler complexity:
+6. Continue reducing MQTT SMS handler complexity:
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-8. Re-check the stale `displayed_sms_id` policy after more cleanup:
+7. Re-check the stale `displayed_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
      also set `displayed_sms_id=None`.
-9. Verify live SMS add/delete/change behavior on a working SIM.
-10. Add focused tests around reconnect/lifecycle ordering where practical.
-11. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+8. Verify live SMS add/delete/change behavior on a working SIM.
+9. Add focused tests around reconnect/lifecycle ordering where practical.
+10. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.
 
 ## Recent DBus Cleanup Notes
 
-- `SmsCommandRegistry` cleanup is now explicit when active ModemManager state is
-  cleared and when one modem is removed via `InterfacesRemoved`. This avoids
-  stale senders left behind by aborted modem tasks.
-- DBus loop shutdown now clears active modem tasks and registry entries before
-  returning, instead of relying on dropped `JoinHandle`s.
+- `src/dbus/logics.rs` was renamed to `src/dbus/schema.rs`, matching the MQTT
+  naming pattern: schema files hold compact vocabulary/mapping helpers rather
+  than runtime logic.
+- The DBus side now has an explicit two-level shape:
+  - `DbusRuntime` in `src/dbus/runtime.rs` is the outer DBus orchestrator;
+  - `ManagerWatcher` in `src/dbus/manager.rs` owns ModemManager-specific
+    state, active streams, and manager-level behavior.
+  The outer `src/dbus/connection.rs` still keeps DBus connection setup,
+  shutdown/command integration, and the top-level select loop.
+- Modem and SMS watcher logic was mechanically moved out of the old DBus
+  top-level file into `src/dbus/modem.rs`. It is intentionally not yet
+  internally split; next work should systematize modem vs SMS responsibilities
+  inside/under that file.
+- The old manager-level `SmsCommandRegistry` was removed. `RefreshSms` now
+  routes directly to the right `ModemWatcher`, which tracks its own SMS command
+  channel internally.
+- DBus shutdown now clears active modem watchers via `ManagerWatcher::reset()`
+  instead of relying on detached task bookkeeping in the outer loop.
 - `wait_for_shutdown()` now lives in `src/shutdown.rs` and is shared by main,
   MQTT, DBus, and tresher.

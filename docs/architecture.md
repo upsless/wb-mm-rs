@@ -30,6 +30,36 @@ mapping ideas, and cleanup semantics, but not as a structural template.
 - Executes DBus method calls requested by the dispatcher.
 - Emits domain events to the dispatcher.
 
+Current DBus implementation is split by responsibility:
+
+- `src/dbus/connection.rs` owns the outer DBus lifecycle: connect to the bus, race
+  connection and runtime work against shutdown, run the top-level event loop,
+  and stop cleanly when the bus/session fails or shutdown is requested.
+- `src/dbus/runtime.rs` owns the DBus-specific orchestration layer:
+  `DbusRuntime` keeps the `org.freedesktop.DBus` proxy, the ModemManager
+  owner-change stream, the dispatcher sender, and the embedded
+  `ManagerWatcher`.
+- `src/dbus/manager.rs` owns ModemManager-specific runtime state and behavior:
+  manager presence, active manager streams, discovered modem watchers, manager
+  event handling, and manager-level DBus command routing.
+- `src/dbus/modem.rs` owns modem and SMS watcher work: per-modem proxy setup,
+  modem property streams, SMS inventory watching, tracked SMS watching, and
+  DBus modem/SMS method calls.
+- `src/dbus/schema.rs` owns DBus/domain vocabulary: object/interface names,
+  typed ids, snapshots, updates, parsers, mappings, and log message helpers.
+
+The outer loop deliberately remains in `connection.rs`: it is the process-level
+control flow for the DBus subsystem. `DbusRuntime` provides the next
+manager-related DBus event and handles it, but the outer loop still decides
+when to stop for shutdown, closed command channel, or unrecoverable DBus
+failure.
+
+The modem and SMS watcher logic currently live together in `src/dbus/modem.rs`.
+That file is intentionally a holding area after extracting the large block from
+the old DBus top-level file; it can be split further into modem- and
+SMS-specific modules once
+the behavior boundary is clearer.
+
 ### MQTT Handler
 
 - Creates Wiren Board devices and controls.
@@ -105,8 +135,15 @@ The project should preserve the useful idea from `mqtt_logics.py` and
 `dbus_logics.py`: bindings between DBus entities and MQTT devices/controls
 should live in compact, easy-to-review mapping definitions.
 
-The exact Rust representation is still open. Prefer typed data structures or
-small declarative config over ad hoc string manipulation.
+Current Rust naming uses `schema.rs` for these compact vocabularies:
+
+- `src/dbus/schema.rs` for DBus/domain ids, snapshots, updates, parsers, and
+  log message helpers;
+- `src/mqtt/schema.rs` for MQTT topic/control schema, payload helpers, and log
+  message helpers.
+
+Prefer typed data structures or small declarative config over ad hoc string
+manipulation.
 
 ## Logging
 
@@ -146,39 +183,3 @@ Use current Wiren Board naming conventions for new topics:
 The new daemon should probably expose names shaped like `modemmanager`,
 `mm_modem_1`, `is_available`, `modems_count`, and `signal_quality`, with final
 names chosen as part of the mapping design.
-
-## Implementation Roadmap
-
-### Stage 1: ModemManager Device
-
-- MQTT + DBus + ModemManager device only.
-- Publish ModemManager version and modem count.
-- Verify correct MQTT updates when:
-  - a modem is disconnected or connected;
-  - ModemManager service is stopped, started, or removed on the Wiren Board.
-- Add focused unit tests.
-
-### Stage 2: Modem Device
-
-- Add per-modem MQTT device with basic modem characteristics.
-- Verify behavior when DBus fails.
-- Verify behavior when MQTT fails: DBus work must stop completely until MQTT
-  returns.
-- Verify daemon shutdown behavior:
-  - normal shutdown cleans up devices/controls correctly;
-  - daemon crash triggers correct Last Will availability state.
-- Add focused unit tests.
-
-### Stage 3: SMS Data
-
-- Add SMS summary data:
-  - total SMS count;
-  - last SMS time in relevant devices.
-- Add SMS viewing in the modem device.
-- Add focused unit tests.
-
-### Stage 4: MQTT-To-DBus Actions
-
-- Add user-initiated control writes from MQTT.
-- Route user actions through the dispatcher into DBus method calls.
-- Add focused unit tests.
