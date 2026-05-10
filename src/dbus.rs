@@ -28,16 +28,6 @@ pub enum LifecycleExit {
     MqttEnded,
 }
 
-/// Runs a single DBus connection attempt.
-pub async fn run(
-    dbus_address: Option<String>,
-    shutdown_rx: watch::Receiver<bool>,
-    command_rx: mpsc::Receiver<DbusCommand>,
-    event_tx: mpsc::Sender<DbusEvent>,
-) -> Result<()> {
-    connection::run(dbus_address, shutdown_rx, command_rx, event_tx).await
-}
-
 /// Runs and reconnects DBus for as long as the current MQTT session is alive.
 ///
 /// Returns `LifecycleExit::Shutdown` on a graceful shutdown signal, or
@@ -57,7 +47,7 @@ pub async fn run_lifecycle(
         let (dbus_command_tx, dbus_command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let _ = command_tx.send(Some(dbus_command_tx));
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
-        let mut dbus_task = tokio::spawn(run(
+        let mut dbus_task = tokio::spawn(connection::run(
             dbus_address.clone(),
             dbus_stop_rx,
             dbus_command_rx,

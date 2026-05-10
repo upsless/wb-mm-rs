@@ -100,7 +100,7 @@ async fn run_supervisor(
         let (actual_dbus_command_tx, actual_dbus_command_rx) =
             watch::channel(None::<mpsc::Sender<exchange::DbusCommand>>);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
-        let mut mqtt_task = tokio::spawn(mqtt::run(
+        let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
             mqtt_address.clone(),
             mqtt_stop_rx.clone(),
             mqtt_message_rx,

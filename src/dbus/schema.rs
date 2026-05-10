@@ -21,6 +21,14 @@ pub const MM_MODEM_MESSAGING_INTERFACE: &str = "org.freedesktop.ModemManager1.Mo
 pub const MM_SIM_INTERFACE: &str = "org.freedesktop.ModemManager1.Sim";
 pub const MM_SMS_INTERFACE: &str = "org.freedesktop.ModemManager1.Sms";
 
+// SMS objects have dynamic DBus paths (`.../SMS/<id>`), so these constants are
+// log identifiers rather than full static `DbusSignalSpec` values.
+pub const SMS_STATE_CHANGED_SIGNAL_ID: &str = "mm_sms_state_changed";
+pub const SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
+pub const SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
+pub const SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
+pub const SMS_STORAGE_CHANGED_SIGNAL_ID: &str = "mm_sms_storage_changed";
+
 /// Small, explicit description of a watched DBus signal.
 ///
 /// Keeping this data near the runtime-independent mappings makes it easier to
@@ -65,14 +73,6 @@ pub const MM_INTERFACES_REMOVED_SIGNAL: DbusSignalSpec = DbusSignalSpec {
     interface: DBUS_OBJECT_MANAGER_INTERFACE,
     member: "InterfacesRemoved",
 };
-
-// SMS objects have dynamic DBus paths (`.../SMS/<id>`), so these constants are
-// log identifiers rather than full static `DbusSignalSpec` values.
-pub const MM_SMS_STATE_CHANGED_SIGNAL_ID: &str = "mm_sms_state_changed";
-pub const MM_SMS_TEXT_CHANGED_SIGNAL_ID: &str = "mm_sms_text_changed";
-pub const MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID: &str = "mm_sms_timestamp_changed";
-pub const MM_SMS_NUMBER_CHANGED_SIGNAL_ID: &str = "mm_sms_number_changed";
-pub const MM_SMS_STORAGE_CHANGED_SIGNAL_ID: &str = "mm_sms_storage_changed";
 
 /// DBus availability state derived from the ModemManager service name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

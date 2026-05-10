@@ -714,7 +714,7 @@ async fn run_sms_task(
         tokio::select! {
             change = state_changes.next() => {
                 let Some(change) = change else {
-                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::MM_SMS_STATE_CHANGED_SIGNAL_ID, &sms_path));
+                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::SMS_STATE_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
                 let is_received = schema::sms_is_received(
@@ -736,7 +736,7 @@ async fn run_sms_task(
             }
             change = storage_changes.next() => {
                 let Some(change) = change else {
-                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::MM_SMS_STORAGE_CHANGED_SIGNAL_ID, &sms_path));
+                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::SMS_STORAGE_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
                 let storage = schema::sms_storage_name(
@@ -759,7 +759,7 @@ async fn run_sms_task(
             }
             change = timestamp_changes.next() => {
                 let Some(change) = change else {
-                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::MM_SMS_TIMESTAMP_CHANGED_SIGNAL_ID, &sms_path));
+                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::SMS_TIMESTAMP_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
                 let timestamp = schema::parse_sms_timestamp(
@@ -781,7 +781,7 @@ async fn run_sms_task(
             }
             change = number_changes.next() => {
                 let Some(change) = change else {
-                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::MM_SMS_NUMBER_CHANGED_SIGNAL_ID, &sms_path));
+                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::SMS_NUMBER_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
                 let number = normalize_string(
@@ -803,7 +803,7 @@ async fn run_sms_task(
             }
             change = text_changes.next() => {
                 let Some(change) = change else {
-                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::MM_SMS_TEXT_CHANGED_SIGNAL_ID, &sms_path));
+                    debug!(target: LOG_TARGET, "{}", schema::sms_signal_stream_closed_message(schema::SMS_TEXT_CHANGED_SIGNAL_ID, &sms_path));
                     break;
                 };
                 let text = normalize_string(
