@@ -5,8 +5,7 @@ use time::OffsetDateTime;
 use tracing::info;
 
 use crate::dbus::{
-    ModemId, ModemInfo, ManagerStatus, ModemUpdate, SmsPropertyChange, SmsSnapshot,
-    SmsUpdate,
+    ManagerStatus, ModemId, ModemInfo, ModemUpdate, SmsPropertyChange, SmsSnapshot, SmsUpdate,
 };
 use crate::mqtt::frontend::{manager_status_payload, modemmanager_is_available};
 use crate::mqtt::r#loop::LOG_TARGET;
@@ -184,10 +183,7 @@ impl MqttPublisher {
         Ok(())
     }
 
-    pub(super) async fn publish_manager_status(
-        &self,
-        status: Option<ManagerStatus>,
-    ) -> Result<()> {
+    pub(super) async fn publish_manager_status(&self, status: Option<ManagerStatus>) -> Result<()> {
         let is_available = switch_payload(status.is_some_and(modemmanager_is_available));
         let manager_status = manager_status_payload(status);
 

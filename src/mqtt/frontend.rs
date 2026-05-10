@@ -6,8 +6,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::dbus::{
-    ManagerUpdate, ModemId, ModemInfo, ManagerStatus, ModemUpdate, SmsId, SmsSnapshot,
-    SmsUpdate,
+    ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
 };
 use crate::exchange::{MqttCommand, MqttEvent};
 use crate::mqtt::r#loop::{LOG_TARGET, MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY, eventloop_result};

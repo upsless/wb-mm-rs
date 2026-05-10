@@ -13,9 +13,8 @@ use crate::exchange::{DbusCommand, DbusEvent};
 use crate::shutdown::wait_for_shutdown;
 
 pub use schema::{
-    LOG_TARGET,
-    ManagerUpdate, ModemId, ModemInfo, ManagerStatus, ModemUpdate, SmsId, SmsPropertyChange,
-    SmsSnapshot, SmsUpdate, 
+    LOG_TARGET, ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId,
+    SmsPropertyChange, SmsSnapshot, SmsUpdate,
 };
 
 const RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
@@ -139,10 +138,7 @@ async fn stop_task(
     stop_finished_task(name, task).await
 }
 
-async fn stop_finished_task(
-    name: &str,
-    task: tokio::task::JoinHandle<Result<()>>,
-) -> Result<()> {
+async fn stop_finished_task(name: &str, task: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
     match task.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => {

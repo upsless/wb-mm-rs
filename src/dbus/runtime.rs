@@ -262,9 +262,7 @@ async fn query_manager_presence(dbus_proxy: &DBusProxy<'_>) -> Result<ManagerPre
             .iter()
             .any(|name| name.as_str() == schema::MM_BUS_NAME)
         {
-            Ok(ManagerPresence::Present(
-                schema::ManagerStatus::Inactive,
-            ))
+            Ok(ManagerPresence::Present(schema::ManagerStatus::Inactive))
         } else {
             Ok(ManagerPresence::Absent)
         }

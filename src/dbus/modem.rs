@@ -137,10 +137,9 @@ impl ModemWatcherWorker {
             }
         }
 
-        if let Some(task) = state.sms_inventory_task.take() {
-            task.abort();
+        if let Some(mut sms_inventory) = state.sms_inventory.take() {
+            sms_inventory.abort();
         }
-        state.sms_inventory_command_tx = None;
 
         Ok(())
     }
@@ -152,15 +151,14 @@ enum ModemWatcherCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ModemSmsCommand {
+enum SmsInventoryCommand {
     TrackSms { sms_id: schema::SmsId },
 }
 
 struct ModemState {
     raw_state: i32,
     info: schema::ModemInfo,
-    sms_inventory_task: Option<JoinHandle<()>>,
-    sms_inventory_command_tx: Option<mpsc::Sender<ModemSmsCommand>>,
+    sms_inventory: Option<SmsInventoryWatcher>,
 }
 
 impl ModemState {
@@ -168,8 +166,7 @@ impl ModemState {
         Self {
             raw_state: queried.raw_state,
             info: queried.info,
-            sms_inventory_task: None,
-            sms_inventory_command_tx: None,
+            sms_inventory: None,
         }
     }
 
@@ -179,17 +176,14 @@ impl ModemState {
         modem_id: &schema::ModemId,
         event_tx: &mpsc::Sender<DbusEvent>,
     ) {
-        if self.sms_inventory_task.is_some() {
+        if self.sms_inventory.is_some() {
             return;
         }
 
-        let (command_tx, command_rx) = mpsc::channel(16);
-        self.sms_inventory_command_tx = Some(command_tx.clone());
-        self.sms_inventory_task = Some(spawn_modem_sms_task(
+        self.sms_inventory = Some(SmsInventoryWatcher::new(
             connection,
             modem_id.clone(),
             event_tx.clone(),
-            command_rx,
         ));
     }
 
@@ -198,9 +192,8 @@ impl ModemState {
         modem_id: &schema::ModemId,
         event_tx: &mpsc::Sender<DbusEvent>,
     ) {
-        if let Some(task) = self.sms_inventory_task.take() {
-            self.sms_inventory_command_tx = None;
-            task.abort();
+        if let Some(mut sms_inventory) = self.sms_inventory.take() {
+            sms_inventory.abort();
             emit_event(
                 event_tx,
                 DbusEvent::SmsInventorySnapshot {
@@ -216,8 +209,8 @@ impl ModemState {
     async fn handle_command(&self, command: ModemWatcherCommand) {
         match command {
             ModemWatcherCommand::TrackSms { sms_id } => {
-                if let Some(command_tx) = self.sms_inventory_command_tx.as_ref() {
-                    let _ = command_tx.send(ModemSmsCommand::TrackSms { sms_id }).await;
+                if let Some(sms_inventory) = self.sms_inventory.as_ref() {
+                    sms_inventory.track_sms(sms_id).await;
                 }
             }
         }
@@ -434,13 +427,17 @@ fn spawn_modem_sms_task(
     connection: &Connection,
     modem_id: schema::ModemId,
     event_tx: mpsc::Sender<DbusEvent>,
-    command_rx: mpsc::Receiver<ModemSmsCommand>,
+    command_rx: mpsc::Receiver<SmsInventoryCommand>,
 ) -> JoinHandle<()> {
     let connection = connection.clone();
     tokio::spawn(async move {
-        if let Err(err) =
-            run_modem_sms_task(connection, modem_id.clone(), event_tx, command_rx).await
-        {
+        let worker = SmsInventoryWorker {
+            connection,
+            modem_id: modem_id.clone(),
+            event_tx,
+            command_rx,
+        };
+        if let Err(err) = worker.run().await {
             debug!(
                 target: LOG_TARGET,
                 "Modem {} SMS inventory watcher failed: {err:#}",
@@ -450,117 +447,40 @@ fn spawn_modem_sms_task(
     })
 }
 
-async fn run_modem_sms_task(
-    connection: Connection,
-    modem_id: schema::ModemId,
-    event_tx: mpsc::Sender<DbusEvent>,
-    mut command_rx: mpsc::Receiver<ModemSmsCommand>,
-) -> Result<()> {
-    let modem_path = schema::modem_path_from_id(&modem_id);
-    let messaging_proxy: Proxy<'_> = ProxyBuilder::new(&connection)
-        .destination(schema::MM_BUS_NAME)
-        .context("failed to set modem messaging proxy destination")?
-        .path(modem_path.as_str())
-        .context("failed to set modem messaging proxy path")?
-        .interface(schema::MM_MODEM_MESSAGING_INTERFACE)
-        .context("failed to set modem messaging proxy interface")?
-        .cache_properties(CacheProperties::Yes)
-        .build()
-        .await
-        .with_context(|| format!("failed to create modem messaging proxy for {}", modem_id.0))?;
-
-    // Subscribe before the initial read so SMS added immediately after
-    // ENABLED is not lost between snapshot and live mode.
-    let mut messages_changes = messaging_proxy
-        .receive_property_changed::<Vec<OwnedObjectPath>>("Messages")
-        .await;
-
-    let initial_sms_ids = query_modem_sms_ids(&messaging_proxy).await?;
-    let initial_sms_snapshot = query_initial_sms_snapshot(&connection, &initial_sms_ids).await?;
-    info!(
-        target: LOG_TARGET,
-        "{}",
-        schema::sms_inventory_snapshot_message(
-            &modem_id,
-            initial_sms_ids.len(),
-            initial_sms_snapshot.as_ref().map(|snapshot| &snapshot.sms_id),
-        )
-    );
-    emit_event(
-        &event_tx,
-        DbusEvent::SmsInventorySnapshot {
-            modem_id: modem_id.clone(),
-            sms_ids: initial_sms_ids.clone(),
-            initial_sms_snapshot: initial_sms_snapshot.clone(),
-        },
-    )
-    .await;
-
-    let mut known_sms_ids: HashSet<_> = initial_sms_ids.into_iter().collect();
-    let mut tracked_sms = TrackedSmsTask::default();
-    if let Some(initial_sms_snapshot) = initial_sms_snapshot {
-        retarget_sms_task(
-            &connection,
-            &modem_id,
-            &event_tx,
-            &mut tracked_sms,
-            &known_sms_ids,
-            Some(&initial_sms_snapshot.sms_id),
-        )
-        .await?;
-    }
-
-    loop {
-        tokio::select! {
-            maybe_command = command_rx.recv() => {
-                let Some(command) = maybe_command else {
-                    break;
-                };
-                match command {
-                    ModemSmsCommand::TrackSms { sms_id } => {
-                        retarget_sms_task(
-                            &connection,
-                            &modem_id,
-                            &event_tx,
-                            &mut tracked_sms,
-                            &known_sms_ids,
-                            Some(&sms_id),
-                        )
-                        .await?;
-                    }
-                }
-            }
-            change = messages_changes.next() => {
-                let Some(change) = change else {
-                    break;
-                };
-                let message_paths = change
-                    .get()
-                    .await
-                    .context("failed to read modem Messages property change")?;
-                let sms_ids = sms_ids_from_paths(&message_paths);
-                known_sms_ids = sms_ids.iter().cloned().collect();
-                sync_tracked_sms_task(
-                    &event_tx,
-                    &modem_id,
-                    &mut tracked_sms,
-                    sms_ids,
-                )
-                .await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Default)]
-struct TrackedSmsTask {
-    sms_id: Option<schema::SmsId>,
+struct SmsInventoryWatcher {
+    command_tx: mpsc::Sender<SmsInventoryCommand>,
     task: Option<JoinHandle<()>>,
 }
 
-impl Drop for TrackedSmsTask {
+impl SmsInventoryWatcher {
+    fn new(
+        connection: &Connection,
+        modem_id: schema::ModemId,
+        event_tx: mpsc::Sender<DbusEvent>,
+    ) -> Self {
+        let (command_tx, command_rx) = mpsc::channel(16);
+        let task = Some(spawn_modem_sms_task(
+            connection, modem_id, event_tx, command_rx,
+        ));
+
+        Self { command_tx, task }
+    }
+
+    async fn track_sms(&self, sms_id: schema::SmsId) {
+        let _ = self
+            .command_tx
+            .send(SmsInventoryCommand::TrackSms { sms_id })
+            .await;
+    }
+
+    fn abort(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for SmsInventoryWatcher {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
@@ -568,87 +488,214 @@ impl Drop for TrackedSmsTask {
     }
 }
 
-async fn retarget_sms_task(
-    connection: &Connection,
-    modem_id: &schema::ModemId,
-    event_tx: &mpsc::Sender<DbusEvent>,
-    tracked_sms: &mut TrackedSmsTask,
-    known_sms_ids: &HashSet<schema::SmsId>,
-    sms_id: Option<&schema::SmsId>,
-) -> Result<()> {
-    if tracked_sms.sms_id.as_ref() == sms_id {
-        return Ok(());
-    }
-
-    if let Some(task) = tracked_sms.task.take() {
-        task.abort();
-    }
-    tracked_sms.sms_id = None;
-
-    let Some(sms_id) = sms_id else {
-        return Ok(());
-    };
-    if !known_sms_ids.contains(sms_id) {
-        return Ok(());
-    }
-
-    if let Some(task) = spawn_sms_task(
-        connection,
-        modem_id.clone(),
-        sms_id.clone(),
-        event_tx.clone(),
-    )
-    .await?
-    {
-        tracked_sms.sms_id = Some(sms_id.clone());
-        tracked_sms.task = Some(task);
-    }
-
-    Ok(())
+struct SmsInventoryWorker {
+    connection: Connection,
+    modem_id: schema::ModemId,
+    event_tx: mpsc::Sender<DbusEvent>,
+    command_rx: mpsc::Receiver<SmsInventoryCommand>,
 }
 
-async fn sync_tracked_sms_task(
-    event_tx: &mpsc::Sender<DbusEvent>,
-    modem_id: &schema::ModemId,
-    tracked_sms: &mut TrackedSmsTask,
-    current_sms_ids: Vec<schema::SmsId>,
-) -> Result<()> {
-    emit_event(
-        event_tx,
-        DbusEvent::SmsListChanged {
-            modem_id: modem_id.clone(),
-            sms_ids: current_sms_ids.clone(),
-        },
-    )
-    .await;
+impl SmsInventoryWorker {
+    async fn run(mut self) -> Result<()> {
+        let modem_path = schema::modem_path_from_id(&self.modem_id);
+        let messaging_proxy: Proxy<'_> = ProxyBuilder::new(&self.connection)
+            .destination(schema::MM_BUS_NAME)
+            .context("failed to set modem messaging proxy destination")?
+            .path(modem_path.as_str())
+            .context("failed to set modem messaging proxy path")?
+            .interface(schema::MM_MODEM_MESSAGING_INTERFACE)
+            .context("failed to set modem messaging proxy interface")?
+            .cache_properties(CacheProperties::Yes)
+            .build()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create modem messaging proxy for {}",
+                    self.modem_id.0
+                )
+            })?;
 
-    let current_sms_ids: std::collections::HashSet<_> = current_sms_ids.into_iter().collect();
-    let Some(sms_id) = tracked_sms.sms_id.clone() else {
-        return Ok(());
-    };
-    if current_sms_ids.contains(&sms_id) {
-        return Ok(());
+        // Subscribe before the initial read so SMS added immediately after
+        // ENABLED is not lost between snapshot and live mode.
+        let mut messages_changes = messaging_proxy
+            .receive_property_changed::<Vec<OwnedObjectPath>>("Messages")
+            .await;
+
+        let initial_sms_ids = query_modem_sms_ids(&messaging_proxy).await?;
+        let initial_sms_snapshot =
+            query_initial_sms_snapshot(&self.connection, &initial_sms_ids).await?;
+        info!(
+            target: LOG_TARGET,
+            "{}",
+            schema::sms_inventory_snapshot_message(
+                &self.modem_id,
+                initial_sms_ids.len(),
+                initial_sms_snapshot.as_ref().map(|snapshot| &snapshot.sms_id),
+            )
+        );
+        emit_event(
+            &self.event_tx,
+            DbusEvent::SmsInventorySnapshot {
+                modem_id: self.modem_id.clone(),
+                sms_ids: initial_sms_ids.clone(),
+                initial_sms_snapshot: initial_sms_snapshot.clone(),
+            },
+        )
+        .await;
+
+        let mut known_sms_ids: HashSet<_> = initial_sms_ids.into_iter().collect();
+        let mut tracked_sms = TrackedSmsWatcher::default();
+        if let Some(initial_sms_snapshot) = initial_sms_snapshot {
+            tracked_sms
+                .retarget(
+                    &self.connection,
+                    &self.modem_id,
+                    &self.event_tx,
+                    &known_sms_ids,
+                    Some(&initial_sms_snapshot.sms_id),
+                )
+                .await?;
+        }
+
+        loop {
+            tokio::select! {
+                maybe_command = self.command_rx.recv() => {
+                    let Some(command) = maybe_command else {
+                        break;
+                    };
+                    match command {
+                        SmsInventoryCommand::TrackSms { sms_id } => {
+                            tracked_sms
+                                .retarget(
+                                    &self.connection,
+                                    &self.modem_id,
+                                    &self.event_tx,
+                                    &known_sms_ids,
+                                    Some(&sms_id),
+                                )
+                                .await?;
+                        }
+                    }
+                }
+                change = messages_changes.next() => {
+                    let Some(change) = change else {
+                        break;
+                    };
+                    let message_paths = change
+                        .get()
+                        .await
+                        .context("failed to read modem Messages property change")?;
+                    let sms_ids = sms_ids_from_paths(&message_paths);
+                    known_sms_ids = sms_ids.iter().cloned().collect();
+                    tracked_sms
+                        .sync_inventory(&self.event_tx, &self.modem_id, sms_ids)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TrackedSmsWatcher {
+    sms_id: Option<schema::SmsId>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Drop for TrackedSmsWatcher {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl TrackedSmsWatcher {
+    async fn retarget(
+        &mut self,
+        connection: &Connection,
+        modem_id: &schema::ModemId,
+        event_tx: &mpsc::Sender<DbusEvent>,
+        known_sms_ids: &HashSet<schema::SmsId>,
+        sms_id: Option<&schema::SmsId>,
+    ) -> Result<()> {
+        if self.sms_id.as_ref() == sms_id {
+            return Ok(());
+        }
+
+        self.clear();
+
+        let Some(sms_id) = sms_id else {
+            return Ok(());
+        };
+        if !known_sms_ids.contains(sms_id) {
+            return Ok(());
+        }
+
+        if let Some(task) = spawn_sms_task(
+            connection,
+            modem_id.clone(),
+            sms_id.clone(),
+            event_tx.clone(),
+        )
+        .await?
+        {
+            self.sms_id = Some(sms_id.clone());
+            self.task = Some(task);
+        }
+
+        Ok(())
     }
 
-    if let Some(task) = tracked_sms.task.take() {
-        task.abort();
-    }
-    tracked_sms.sms_id = None;
-    info!(
-        target: LOG_TARGET,
-        "{}",
-        schema::sms_deleted_message(modem_id, &sms_id)
-    );
-    emit_event(
-        event_tx,
-        DbusEvent::SmsDeleted {
-            modem_id: modem_id.clone(),
-            sms_id,
-        },
-    )
-    .await;
+    async fn sync_inventory(
+        &mut self,
+        event_tx: &mpsc::Sender<DbusEvent>,
+        modem_id: &schema::ModemId,
+        current_sms_ids: Vec<schema::SmsId>,
+    ) -> Result<()> {
+        emit_event(
+            event_tx,
+            DbusEvent::SmsListChanged {
+                modem_id: modem_id.clone(),
+                sms_ids: current_sms_ids.clone(),
+            },
+        )
+        .await;
 
-    Ok(())
+        let current_sms_ids: std::collections::HashSet<_> = current_sms_ids.into_iter().collect();
+        let Some(sms_id) = self.sms_id.clone() else {
+            return Ok(());
+        };
+        if current_sms_ids.contains(&sms_id) {
+            return Ok(());
+        }
+
+        self.clear();
+        info!(
+            target: LOG_TARGET,
+            "{}",
+            schema::sms_deleted_message(modem_id, &sms_id)
+        );
+        emit_event(
+            event_tx,
+            DbusEvent::SmsDeleted {
+                modem_id: modem_id.clone(),
+                sms_id,
+            },
+        )
+        .await;
+
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.sms_id = None;
+    }
 }
 
 async fn spawn_sms_task(
