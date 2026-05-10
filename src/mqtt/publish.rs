@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use tracing::info;
 
 use crate::dbus::{
-    self, ModemId, ModemInfo, ModemManagerStatus, ModemUpdate, SmsPropertyChange, SmsSnapshot,
+    ModemId, ModemInfo, ManagerStatus, ModemUpdate, SmsPropertyChange, SmsSnapshot,
     SmsUpdate,
 };
 use crate::mqtt::frontend::{manager_status_payload, modemmanager_is_available};
@@ -186,7 +186,7 @@ impl MqttPublisher {
 
     pub(super) async fn publish_manager_status(
         &self,
-        status: Option<ModemManagerStatus>,
+        status: Option<ManagerStatus>,
     ) -> Result<()> {
         let is_available = switch_payload(status.is_some_and(modemmanager_is_available));
         let manager_status = manager_status_payload(status);
@@ -971,7 +971,7 @@ impl MqttPublisher {
         unixtime_control_name: &str,
         value: Option<OffsetDateTime>,
     ) -> Result<()> {
-        let text_payload = value.map(dbus::format_timestamp_for_wb);
+        let text_payload = value.map(format_timestamp_for_wb);
         let unixtime_payload = value.map(|value| value.unix_timestamp());
 
         self.publish_control(device_name, text_control_name, text_payload)
@@ -1024,4 +1024,16 @@ impl MqttPublisher {
 
 pub(super) fn switch_payload(value: bool) -> WbSwitch {
     WbSwitch(value)
+}
+
+pub fn format_timestamp_for_wb(value: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+    )
 }

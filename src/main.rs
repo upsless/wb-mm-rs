@@ -11,24 +11,20 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
 use crate::shutdown::wait_for_shutdown;
 
-const DBUS_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
-const DBUS_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
-const DBUS_RECONNECT_FAST_ATTEMPTS: u32 = 24;
-const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
-const DBUS_COMMAND_CHANNEL_CAPACITY: usize = 32;
+const LOG_TARGET: &str = "MAIN";
 
 const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 const MQTT_MESSAGE_CHANNEL_CAPACITY: usize = 32;
 const MQTT_EVENT_CHANNEL_CAPACITY: usize = 32;
-const LOG_TARGET: &str = "MAIN";
+const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -118,7 +114,7 @@ async fn run_supervisor(
             actual_dbus_command_rx,
         ));
 
-        match run_dbus_lifecycle(
+        match dbus::run_lifecycle(
             dbus_address.clone(),
             &mut shutdown_rx,
             &mqtt_stop_tx,
@@ -128,12 +124,12 @@ async fn run_supervisor(
         )
         .await?
         {
-            SupervisorExit::Shutdown => {
+            dbus::LifecycleExit::Shutdown => {
                 stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
                 return Ok(());
             }
-            SupervisorExit::MqttEnded => {
+            dbus::LifecycleExit::MqttEnded => {
                 stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 let delay = reconnect_delay(
                     mqtt_retry_attempt,
@@ -157,94 +153,6 @@ async fn run_supervisor(
     }
 }
 
-/// Runs and reconnects DBus while the current MQTT session is alive.
-async fn run_dbus_lifecycle(
-    dbus_address: Option<String>,
-    shutdown_rx: &mut watch::Receiver<bool>,
-    mqtt_stop_tx: &watch::Sender<bool>,
-    mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
-    dbus_event_tx: mpsc::Sender<exchange::DbusEvent>,
-    actual_dbus_command_tx: &watch::Sender<Option<mpsc::Sender<exchange::DbusCommand>>>,
-) -> Result<SupervisorExit> {
-    let mut dbus_retry_attempt = 1;
-
-    loop {
-        let (dbus_command_tx, dbus_command_rx) = mpsc::channel(DBUS_COMMAND_CHANNEL_CAPACITY);
-        let _ = actual_dbus_command_tx.send(Some(dbus_command_tx));
-        let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
-        let mut dbus_task = tokio::spawn(dbus::run(
-            dbus_address.clone(),
-            dbus_stop_rx,
-            dbus_command_rx,
-            dbus_event_tx.clone(),
-        ));
-
-        let retry_delay = tokio::select! {
-            result = wait_for_shutdown(shutdown_rx) => {
-                result?;
-                let _ = actual_dbus_command_tx.send(None);
-                stop_child_task("DBus", dbus_stop_tx, dbus_task).await?;
-                let _ = mqtt_stop_tx.send(true);
-                return Ok(SupervisorExit::Shutdown);
-            }
-            mqtt_result = &mut *mqtt_task => {
-                log_unexpected_task_exit("MQTT", mqtt_result)?;
-                info!(target: LOG_TARGET, "Stopping DBus because MQTT connection is unavailable.");
-                let _ = actual_dbus_command_tx.send(None);
-                let _ = dbus_stop_tx.send(true);
-                stop_finished_or_stopping_task("DBus", dbus_task).await?;
-                return Ok(SupervisorExit::MqttEnded);
-            }
-            dbus_result = &mut dbus_task => {
-                log_unexpected_task_exit("DBus", dbus_result)?;
-                let _ = actual_dbus_command_tx.send(None);
-                debug!(target: LOG_TARGET, "{}", dbus::modemmanager_not_found_message());
-                if dbus_event_tx
-                    .send(exchange::DbusEvent::ManagerDeleted)
-                    .await
-                    .is_err()
-                {
-                    debug!(
-                        target: LOG_TARGET,
-                        "DBus event channel closed while reporting ManagerDeleted"
-                    );
-                }
-
-                let delay = reconnect_delay(
-                    dbus_retry_attempt,
-                    DBUS_RECONNECT_FAST_INTERVAL,
-                    DBUS_RECONNECT_SLOW_INTERVAL,
-                    DBUS_RECONNECT_FAST_ATTEMPTS,
-                );
-                info!(
-                    target: LOG_TARGET,
-                    "DBus connection lost, retrying in {} second(s) (attempt {}).",
-                    delay.as_secs(),
-                    dbus_retry_attempt
-                );
-                dbus_retry_attempt += 1;
-
-                delay
-            }
-        };
-
-        tokio::select! {
-            result = wait_for_shutdown(shutdown_rx) => {
-                result?;
-                let _ = actual_dbus_command_tx.send(None);
-                let _ = mqtt_stop_tx.send(true);
-                return Ok(SupervisorExit::Shutdown);
-            }
-            mqtt_result = &mut *mqtt_task => {
-                log_unexpected_task_exit("MQTT", mqtt_result)?;
-                let _ = actual_dbus_command_tx.send(None);
-                return Ok(SupervisorExit::MqttEnded);
-            }
-            _ = sleep(retry_delay) => {}
-        }
-    }
-}
-
 /// Converts a task result into an `anyhow::Result` with the task name in the
 /// error context.
 fn task_result(
@@ -254,23 +162,6 @@ fn task_result(
     result
         .with_context(|| format!("{name} task join failed"))?
         .with_context(|| format!("{name} task failed"))
-}
-
-/// Logs an early child-task exit and returns an error only for Tokio join
-/// failures.
-fn log_unexpected_task_exit(
-    name: &str,
-    result: std::result::Result<Result<()>, tokio::task::JoinError>,
-) -> Result<()> {
-    match result {
-        Ok(Ok(())) => error!(target: LOG_TARGET, "{name} loop exited before shutdown."),
-        Ok(Err(err)) => error!(target: LOG_TARGET, "{name} loop failed: {err:#}"),
-        Err(join_error) => {
-            return Err(anyhow::anyhow!("{name} task join failed: {join_error}"));
-        }
-    }
-
-    Ok(())
 }
 
 async fn stop_child_task(
@@ -320,11 +211,6 @@ async fn sleep_until_retry_or_shutdown(
         }
         _ = sleep(delay) => Ok(false),
     }
-}
-
-enum SupervisorExit {
-    Shutdown,
-    MqttEnded,
 }
 
 /// Initializes tracing from `RUST_LOG` and suppresses noisy rumqttc state logs

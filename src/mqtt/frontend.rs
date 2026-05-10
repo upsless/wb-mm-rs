@@ -6,7 +6,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::dbus::{
-    ManagerUpdate, ModemId, ModemInfo, ModemManagerStatus, ModemUpdate, SmsId, SmsSnapshot,
+    ManagerUpdate, ModemId, ModemInfo, ManagerStatus, ModemUpdate, SmsId, SmsSnapshot,
     SmsUpdate,
 };
 use crate::exchange::{MqttCommand, MqttEvent};
@@ -550,14 +550,14 @@ fn parse_modem_control_on_topic(topic: &str, control_name: &str) -> Option<u32> 
     modem_index.parse::<u32>().ok()
 }
 
-pub(super) fn modemmanager_is_available(status: ModemManagerStatus) -> bool {
-    matches!(status, ModemManagerStatus::Active)
+pub(super) fn modemmanager_is_available(status: ManagerStatus) -> bool {
+    matches!(status, ManagerStatus::Active)
 }
 
-pub(super) fn manager_status_payload(status: Option<ModemManagerStatus>) -> &'static str {
+pub(super) fn manager_status_payload(status: Option<ManagerStatus>) -> &'static str {
     match status {
-        Some(ModemManagerStatus::Active) => "active",
-        Some(ModemManagerStatus::Inactive) => "inactive",
+        Some(ManagerStatus::Active) => "active",
+        Some(ManagerStatus::Inactive) => "inactive",
         None => "not_found_on_dbus",
     }
 }

@@ -58,8 +58,8 @@ const MM_CONTROL_SPECS: [ControlSpec; 5] = [
     },
     ControlSpec {
         name: MM_CONTROL_MANAGER_STATUS,
-        title_en: "ModemManager (MM)",
-        title_ru: "ModemManager (MM)",
+        title_en: "ModemManager (DBus)",
+        title_ru: "ModemManager (DBus)",
         order: 1,
         control_type: "text",
         readonly: true,

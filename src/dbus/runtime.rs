@@ -251,7 +251,7 @@ async fn query_manager_presence(dbus_proxy: &DBusProxy<'_>) -> Result<ManagerPre
         .await
         .context("failed to query ModemManager DBus owner")?
     {
-        Ok(ManagerPresence::Present(schema::ModemManagerStatus::Active))
+        Ok(ManagerPresence::Present(schema::ManagerStatus::Active))
     } else {
         let activatable_names = dbus_proxy
             .list_activatable_names()
@@ -263,7 +263,7 @@ async fn query_manager_presence(dbus_proxy: &DBusProxy<'_>) -> Result<ManagerPre
             .any(|name| name.as_str() == schema::MM_BUS_NAME)
         {
             Ok(ManagerPresence::Present(
-                schema::ModemManagerStatus::Inactive,
+                schema::ManagerStatus::Inactive,
             ))
         } else {
             Ok(ManagerPresence::Absent)

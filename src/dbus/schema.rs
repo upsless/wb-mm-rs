@@ -2,6 +2,10 @@ use time::{OffsetDateTime, format_description::well_known::Iso8601};
 
 pub const LOG_TARGET: &str = "DBUS";
 
+pub const DBUS_CONNECTED_MESSAGE: &str = "Connection established";
+pub const DBUS_STOPPED_BEFORE_CONNECT_MESSAGE: &str = "Stopped before connection was established";
+pub const DBUS_STOPPED_MESSAGE: &str = "Connection closed";
+
 /// Well-known DBus service name used by ModemManager.
 pub const DBUS_BUS_NAME: &str = "org.freedesktop.DBus";
 pub const DBUS_OBJ_PATH: &str = "/org/freedesktop/DBus";
@@ -72,7 +76,7 @@ pub const MM_SMS_STORAGE_CHANGED_SIGNAL_ID: &str = "mm_sms_storage_changed";
 
 /// DBus availability state derived from the ModemManager service name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModemManagerStatus {
+pub enum ManagerStatus {
     Active,
     Inactive,
 }
@@ -88,7 +92,7 @@ pub struct SmsId(pub String);
 /// Single manager-property update emitted from live DBus observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagerUpdate {
-    Status(ModemManagerStatus),
+    Status(ManagerStatus),
     Version(String),
     ModemCount(usize),
 }
@@ -263,10 +267,6 @@ fn format_text_summary(value: Option<&str>) -> String {
     }
 }
 
-pub const DBUS_CONNECTED_MESSAGE: &str = "Connection established";
-pub const DBUS_STOPPED_BEFORE_CONNECT_MESSAGE: &str = "Stopped before connection was established";
-pub const DBUS_STOPPED_MESSAGE: &str = "Connection closed";
-
 pub fn dbus_signal_stream_closed_message(signal: DbusSignalSpec) -> String {
     format!(
         "Signal stream closed: {} ({} {} {}.{})",
@@ -274,17 +274,17 @@ pub fn dbus_signal_stream_closed_message(signal: DbusSignalSpec) -> String {
     )
 }
 
-pub fn modemmanager_status_message(status: ModemManagerStatus) -> &'static str {
+pub fn modemmanager_status_message(status: ManagerStatus) -> &'static str {
     match status {
-        ModemManagerStatus::Active => "ModemManager found on DBus and Active",
-        ModemManagerStatus::Inactive => "ModemManager found on DBus and Inactive",
+        ManagerStatus::Active => "ModemManager found on DBus and Active",
+        ManagerStatus::Inactive => "ModemManager found on DBus and Inactive",
     }
 }
 
-pub fn modemmanager_status_name(status: ModemManagerStatus) -> &'static str {
+pub fn modemmanager_status_name(status: ManagerStatus) -> &'static str {
     match status {
-        ModemManagerStatus::Active => "active",
-        ModemManagerStatus::Inactive => "inactive",
+        ManagerStatus::Active => "active",
+        ManagerStatus::Inactive => "inactive",
     }
 }
 
@@ -410,16 +410,4 @@ pub fn parse_sms_timestamp(timestamp: &str) -> Option<OffsetDateTime> {
     }
 
     OffsetDateTime::parse(trimmed, &Iso8601::DEFAULT).ok()
-}
-
-pub fn format_timestamp_for_wb(value: OffsetDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second(),
-    )
 }

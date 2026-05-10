@@ -82,7 +82,7 @@ pub(super) struct ManagerWatcher {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagerPresence {
-    Present(schema::ModemManagerStatus),
+    Present(schema::ManagerStatus),
     Absent,
 }
 
@@ -122,7 +122,7 @@ impl ManagerWatcher {
         connection: &Connection,
         event_tx: &mpsc::Sender<DbusEvent>,
     ) -> Result<()> {
-        if self.presence != ManagerPresence::Present(schema::ModemManagerStatus::Active) {
+        if self.presence != ManagerPresence::Present(schema::ManagerStatus::Active) {
             return Ok(());
         }
 
