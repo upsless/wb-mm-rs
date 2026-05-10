@@ -63,10 +63,11 @@ stopped and runtime state dropped until MQTT reconnects.
 
 ## Current Architecture State
 
-- `main.rs` owns compact reconnect supervision:
+- `main.rs` owns the top-level supervisor only:
   - MQTT is the top-level lifecycle gate;
   - DBus runs only while MQTT is connected;
-  - DBus and MQTT reconnect use fast/slow retry intervals;
+  - MQTT reconnect intervals still live in `main.rs`;
+  - DBus reconnect intervals now live in `src/dbus.rs`;
   - on DBus session failure, current code maps loss to `ManagerDeleted` until
     the bus returns;
   - on MQTT loss, DBus is stopped first; after reconnect both subsystems start
@@ -79,7 +80,7 @@ stopped and runtime state dropped until MQTT reconnects.
 - MQTT publishes retained WB device/control topics for one stable main device
   and per-modem devices, clears retained topics on normal shutdown, and sets
   Last Will on the top-level availability control.
-- `ModemManagerStatus` is only `Active | Inactive`; DBus object disappearance
+- `ManagerStatus` is only `Active | Inactive`; DBus object disappearance
   is represented by `ManagerDeleted`.
 - MQTT-facing modem numbering starts from `1` even when DBus modem ids start
   from `0`. DBus ids stay internal; MQTT device names are user-facing, e.g.
@@ -97,6 +98,13 @@ stopped and runtime state dropped until MQTT reconnects.
     DBus commands for SMS refresh/delete;
   - `src/dbus/schema.rs` replaced the old `src/dbus/logics.rs` name and holds
     DBus/domain vocabulary, mappings, parsers, and log message helpers.
+- MQTT runtime is similarly layered:
+  - `src/mqtt.rs` owns one MQTT session lifecycle;
+  - `src/mqtt/loop.rs` owns the low-level rumqtt event loop polling;
+  - `src/mqtt/frontend.rs` owns MQTT-side command handling and user writes;
+  - `src/mqtt/publish.rs` owns retained publish/cleanup helpers and publisher
+    state;
+  - `src/mqtt/state.rs` owns frontend state.
 
 ## Current Exchange Vocabulary
 
@@ -308,11 +316,14 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   modem collection, and manager-level command/event handling.
 - `src/dbus/modem.rs` - modem/SMS watchers, modem/SMS proxy setup, SMS
   inventory and tracked-SMS streams, and SMS refresh/delete DBus commands.
+- `src/mqtt.rs` - MQTT session lifecycle, frontend startup, graceful stop, and
+  command/shutdown integration.
 - `src/mqtt/schema.rs` - MQTT device/control schema, topic builders, metadata,
   and log message helpers.
 - `src/mqtt/state.rs` - MQTT session, modem, and SMS state machines.
 - `src/mqtt/state/tests.rs` - unit tests for MQTT state behavior.
-- `src/mqtt/loop.rs` - MQTT runtime lifecycle and event loop.
+- `src/mqtt/loop.rs` - low-level rumqtt event loop polling and incoming
+  publish forwarding.
 - `src/mqtt/frontend.rs` - MQTT command handling, frontend/business decisions,
   user write parsing, and state orchestration.
 - `src/mqtt/publish.rs` - MQTT retained publishing, cleanup, metadata sync, and

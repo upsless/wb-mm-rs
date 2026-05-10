@@ -72,6 +72,19 @@ the behavior boundary is clearer.
 - Sets MQTT Last Will so that an unexpected daemon stop marks ModemManager as
   unavailable in the UI/control model.
 
+Current MQTT implementation is also split by responsibility:
+
+- `src/mqtt.rs` owns MQTT session lifecycle: option building, Last Will setup,
+  frontend startup, graceful stop, and integration of the MQTT event loop with
+  command and shutdown channels.
+- `src/mqtt/loop.rs` owns the low-level rumqtt event loop polling and forwards
+  incoming publishes into the frontend pipeline.
+- `src/mqtt/frontend.rs` owns MQTT-side command handling and user-write
+  processing.
+- `src/mqtt/publish.rs` owns retained publish/cleanup helpers and
+  publication-only state.
+- `src/mqtt/state.rs` owns the frontend state model.
+
 ### Dispatcher
 
 - Owns high-level daemon state.
@@ -112,6 +125,13 @@ Consequences:
 - After MQTT reconnect, publish metadata again and perform fresh DBus discovery.
 - If DBus is lost while MQTT is connected, keep MQTT alive, mark ModemManager as
   unavailable, retry DBus, and republish fresh state after DBus recovery.
+
+The top-level supervisor still lives in `main.rs`, but subsystem lifecycle
+details now live one layer lower:
+
+- `src/mqtt.rs::run_lifecycle()` owns one MQTT session from connect to stop;
+- `src/dbus.rs::run_lifecycle()` owns DBus reconnect behavior while that MQTT
+  session is alive.
 
 ## Availability Semantics
 
