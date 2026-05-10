@@ -6,9 +6,8 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::debug;
 
-use crate::mqtt::schema;
+use crate::mqtt::logstrings;
 
-pub(super) const LOG_TARGET: &str = "MQTT";
 pub(super) const MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) async fn run_eventloop(
@@ -23,7 +22,7 @@ pub(super) async fn run_eventloop(
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 if !connected {
                     connected = true;
-                    debug!(target: LOG_TARGET, "{}", schema::mqtt_connected_message());
+                    debug!(target: logstrings::LOG_TARGET, "{}", logstrings::mqtt_connected_message());
                 }
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {

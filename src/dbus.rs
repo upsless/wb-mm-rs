@@ -1,21 +1,24 @@
 mod connection;
+mod logstrings;
 mod manager;
 mod modem;
 mod runtime;
 mod schema;
+mod sms;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
-use crate::exchange::{DbusCommand, DbusEvent};
-use crate::shutdown::wait_for_shutdown;
+use crate::common::wait_for_shutdown;
+use crate::domain::{DbusCommand, DbusEvent};
 
-pub use schema::{
-    LOG_TARGET, ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId,
-    SmsPropertyChange, SmsSnapshot, SmsUpdate,
+pub use crate::domain::{
+    ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsPropertyChange,
+    SmsSnapshot, SmsUpdate,
 };
+pub use logstrings::LOG_TARGET;
 
 const RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
@@ -72,7 +75,7 @@ pub async fn run_lifecycle(
             dbus_result = &mut dbus_task => {
                 log_unexpected_exit("DBus", dbus_result)?;
                 let _ = command_tx.send(None);
-                debug!(target: LOG_TARGET, "{}", schema::manager_deleted_message());
+                debug!(target: LOG_TARGET, "{}", logstrings::manager_deleted_message());
                 if event_tx.send(DbusEvent::ManagerDeleted).await.is_err() {
                     debug!(
                         target: LOG_TARGET,

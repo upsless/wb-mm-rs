@@ -7,8 +7,7 @@ use tracing::info;
 use crate::dbus::{
     ManagerStatus, ModemId, ModemInfo, ModemUpdate, SmsPropertyChange, SmsSnapshot, SmsUpdate,
 };
-use crate::mqtt::frontend::{manager_status_payload, modemmanager_is_available};
-use crate::mqtt::r#loop::LOG_TARGET;
+use crate::mqtt::logstrings;
 use crate::mqtt::schema::{self, ControlSpec};
 use crate::mqtt::state::{MqttModemSmsState, max_message_select_index};
 
@@ -142,7 +141,7 @@ impl MqttPublisher {
         self.publish_control(
             schema::MM_DEVICE_NAME,
             schema::MM_CONTROL_MANAGER_STATUS,
-            manager_status_payload(None),
+            schema::manager_status_payload(None),
         )
         .await?;
         self.publish_control(schema::MM_DEVICE_NAME, schema::MM_CONTROL_VERSION, MqttNull)
@@ -176,7 +175,7 @@ impl MqttPublisher {
         .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "Update main device manager data: version={version} modem_count={modem_count}"
         );
 
@@ -184,8 +183,8 @@ impl MqttPublisher {
     }
 
     pub(super) async fn publish_manager_status(&self, status: Option<ManagerStatus>) -> Result<()> {
-        let is_available = switch_payload(status.is_some_and(modemmanager_is_available));
-        let manager_status = manager_status_payload(status);
+        let is_available = switch_payload(status.is_some_and(schema::modemmanager_is_available));
+        let manager_status = schema::manager_status_payload(status);
 
         self.publish_control(
             schema::MM_DEVICE_NAME,
@@ -201,12 +200,12 @@ impl MqttPublisher {
         .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_mm_availability_message(is_available.as_str())
+            logstrings::mqtt_publish_mm_availability_message(is_available.as_str())
         );
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "Update main device manager status: status={manager_status}"
         );
 
@@ -218,9 +217,9 @@ impl MqttPublisher {
             .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_mm_version_message(version)
+            logstrings::mqtt_publish_mm_version_message(version)
         );
 
         Ok(())
@@ -235,9 +234,9 @@ impl MqttPublisher {
         .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_mm_modem_count_message(modem_count)
+            logstrings::mqtt_publish_mm_modem_count_message(modem_count)
         );
 
         Ok(())
@@ -298,7 +297,7 @@ impl MqttPublisher {
         .await?;
         self.publish_control(
             &device_name,
-            schema::MODEM_CONTROL_LAST_SMS_DBUS_ID,
+            schema::MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID,
             MqttNull,
         )
         .await?;
@@ -440,9 +439,9 @@ impl MqttPublisher {
         .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_modem_snapshot_message(
+            logstrings::mqtt_publish_modem_snapshot_message(
                 modem_index,
                 &modem_id.0,
                 &info.summary(),
@@ -508,9 +507,9 @@ impl MqttPublisher {
         }
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_modem_update_message(
+            logstrings::mqtt_publish_modem_update_message(
                 modem_index,
                 &modem_id.0,
                 &update.summary(),
@@ -561,7 +560,7 @@ impl MqttPublisher {
         self.ensure_modem_sms_controls(modem_id, modem_index)
             .await?;
         let sms_count = modem_sms.sms_count();
-        let last_sms_id = modem_sms.last_sms_id().cloned();
+        let last_received_sms_id = modem_sms.last_received_sms_id().cloned();
         let picked_sms_index = modem_sms.picked_sms_index();
         let displayed_sms_index = modem_sms.displayed_sms_index();
         let max_index = max_message_select_index(sms_count);
@@ -575,8 +574,10 @@ impl MqttPublisher {
 
         self.publish_control(
             &device_name,
-            schema::MODEM_CONTROL_LAST_SMS_DBUS_ID,
-            last_sms_id.as_ref().map(|sms_id| sms_id.0.as_str()),
+            schema::MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID,
+            last_received_sms_id
+                .as_ref()
+                .map(|sms_id| sms_id.0.as_str()),
         )
         .await?;
 
@@ -634,9 +635,9 @@ impl MqttPublisher {
             .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_modem_sms_count_message(modem_index, &modem_id.0, sms_count)
+            logstrings::mqtt_publish_modem_sms_count_message(modem_index, &modem_id.0, sms_count)
         );
 
         Ok(())
@@ -651,9 +652,9 @@ impl MqttPublisher {
         .await?;
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_mm_sms_count_message(sms_count)
+            logstrings::mqtt_publish_mm_sms_count_message(sms_count)
         );
 
         Ok(())
@@ -687,9 +688,9 @@ impl MqttPublisher {
         }
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_message_select_control_message(
+            logstrings::mqtt_publish_message_select_control_message(
                 modem_index,
                 &modem_id.0,
                 picked_index,
@@ -820,9 +821,9 @@ impl MqttPublisher {
         }
 
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_publish_picked_sms_message(
+            logstrings::mqtt_publish_picked_sms_message(
                 modem_index,
                 &modem_id.0,
                 snapshot.map(SmsSnapshot::summary).as_deref(),
@@ -967,7 +968,7 @@ impl MqttPublisher {
         unixtime_control_name: &str,
         value: Option<OffsetDateTime>,
     ) -> Result<()> {
-        let text_payload = value.map(format_timestamp_for_wb);
+        let text_payload = value.map(schema::format_timestamp_for_wb);
         let unixtime_payload = value.map(|value| value.unix_timestamp());
 
         self.publish_control(device_name, text_control_name, text_payload)
@@ -1020,16 +1021,4 @@ impl MqttPublisher {
 
 pub(super) fn switch_payload(value: bool) -> WbSwitch {
     WbSwitch(value)
-}
-
-pub fn format_timestamp_for_wb(value: OffsetDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second(),
-    )
 }

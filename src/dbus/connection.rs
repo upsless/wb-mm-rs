@@ -4,14 +4,12 @@ use tokio::sync::watch;
 use tracing::debug;
 use zbus::{Connection, connection::Builder};
 
-use crate::dbus::schema;
-use crate::exchange::{DbusCommand, DbusEvent};
-use crate::shutdown::wait_for_shutdown;
+use crate::common::wait_for_shutdown;
+use crate::domain::{DbusCommand, DbusEvent};
 
+use super::logstrings;
 use super::manager::{LoopFlow, ManagerLoopEvent};
 use super::runtime::DbusRuntime;
-
-const LOG_TARGET: &str = "DBUS";
 
 /// Opens the system bus or the custom DBus address passed by the CLI.
 async fn connect(dbus_address: Option<&str>) -> Result<Connection> {
@@ -28,9 +26,9 @@ async fn connect(dbus_address: Option<&str>) -> Result<Connection> {
 }
 
 pub(super) async fn emit_event(event_tx: &mpsc::Sender<DbusEvent>, event: DbusEvent) {
-    debug!(target: LOG_TARGET, "Sending DBus event to DISP: {event:?}");
+    debug!(target: logstrings::LOG_TARGET, "Sending DBus event to DISP: {event:?}");
     if event_tx.send(event).await.is_err() {
-        debug!(target: LOG_TARGET, "Event channel closed while sending");
+        debug!(target: logstrings::LOG_TARGET, "Event channel closed while sending");
     }
 }
 
@@ -49,12 +47,12 @@ pub async fn run(
         result = connect(dbus_address.as_deref()) => result?,
         result = wait_for_shutdown(&mut shutdown_rx) => {
             result?;
-            debug!(target: LOG_TARGET, "{}", schema::DBUS_STOPPED_BEFORE_CONNECT_MESSAGE);
+            debug!(target: logstrings::LOG_TARGET, "{}", logstrings::DBUS_STOPPED_BEFORE_CONNECT_MESSAGE);
             return Ok(());
         }
     };
 
-    debug!(target: LOG_TARGET, "{}", schema::DBUS_CONNECTED_MESSAGE);
+    debug!(target: logstrings::LOG_TARGET, "{}", logstrings::DBUS_CONNECTED_MESSAGE);
 
     let mut runtime = DbusRuntime::new(connection, event_tx).await?;
 
@@ -79,9 +77,9 @@ pub async fn run(
         }
     }
 
-    runtime.reset_manager();
+    runtime.modem_manager.reset();
 
-    debug!(target: LOG_TARGET, "{}", schema::DBUS_STOPPED_MESSAGE);
+    debug!(target: logstrings::LOG_TARGET, "{}", logstrings::DBUS_STOPPED_MESSAGE);
 
     Ok(())
 }

@@ -86,20 +86,12 @@ impl MqttSessionState {
     }
 }
 
-impl MqttModemState {
-    pub(super) fn ensure_sms_state(&mut self) {
-        if self.sms_state.is_none() {
-            self.sms_state = Some(MqttModemSmsState::default());
-        }
-    }
-}
-
 impl MqttModemSmsState {
     pub(super) fn sms_count(&self) -> usize {
         self.sms_order.len()
     }
 
-    pub(super) fn last_sms_id(&self) -> Option<&SmsId> {
+    pub(super) fn last_received_sms_id(&self) -> Option<&SmsId> {
         self.sms_order.last()
     }
 

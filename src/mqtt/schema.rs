@@ -18,7 +18,7 @@ pub const MODEM_CONTROL_OWN_NUMBERS: &str = "own_numbers";
 pub const MODEM_CONTROL_SIGNAL_QUALITY: &str = "signal_quality";
 pub const MODEM_CONTROL_DISPLAYED_SMS_INDEX: &str = "displayed_sms_index";
 pub const MODEM_CONTROL_SMS_COUNT: &str = "sms_count";
-pub const MODEM_CONTROL_LAST_SMS_DBUS_ID: &str = "last_sms_dbus_id";
+pub const MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID: &str = "last_received_sms_dbus_id";
 pub const MODEM_CONTROL_MESSAGE_SELECT: &str = "message_select";
 pub const MODEM_CONTROL_SELECTED_SMS_DBUS_ID: &str = "selected_sms_dbus_id";
 pub const MODEM_CONTROL_SELECTED_SMS_TIMESTAMP: &str = "selected_sms_timestamp";
@@ -219,7 +219,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         max: None,
     },
     ControlSpec {
-        name: MODEM_CONTROL_LAST_SMS_DBUS_ID,
+        name: MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID,
         title_en: "Last incoming SMS DBus#",
         title_ru: "Последняя вх.СМС, DBus#",
         order: 18,
@@ -386,88 +386,28 @@ pub fn dynamic_delete_message_spec(readonly: bool) -> ControlSpec {
     ControlSpec { readonly, ..*base }
 }
 
-pub fn mqtt_connected_message() -> &'static str {
-    "Connection established"
+pub(super) fn modemmanager_is_available(status: crate::domain::ManagerStatus) -> bool {
+    matches!(status, crate::domain::ManagerStatus::Active)
 }
 
-pub fn mqtt_stopped_message() -> &'static str {
-    "Loop stopped"
-}
-
-pub fn mqtt_publish_mm_availability_message(is_available: &str) -> String {
-    format!("Update ModemManager: is_available={is_available}")
-}
-
-pub fn mqtt_publish_mm_version_message(version: &str) -> String {
-    format!("Update ModemManager: version={version}")
-}
-
-pub fn mqtt_publish_mm_modem_count_message(modem_count: usize) -> String {
-    format!("Update ModemManager: modem_count={modem_count}")
-}
-
-pub fn mqtt_publish_mm_sms_count_message(sms_count: usize) -> String {
-    format!("Update ModemManager: sms_count={sms_count}")
-}
-
-pub fn mqtt_publish_modem_snapshot_message(
-    modem_index: u32,
-    dbus_modem_id: &str,
-    snapshot: &str,
-) -> String {
-    format!("Update modem snapshot: modem={modem_index} dbus_modem_id={dbus_modem_id} {snapshot}")
-}
-
-pub fn mqtt_publish_modem_update_message(
-    modem_index: u32,
-    dbus_modem_id: &str,
-    update: &str,
-) -> String {
-    format!("Update modem update: modem={modem_index} dbus_modem_id={dbus_modem_id} {update}")
-}
-
-pub fn mqtt_publish_modem_sms_count_message(
-    modem_index: u32,
-    dbus_modem_id: &str,
-    sms_count: usize,
-) -> String {
-    format!(
-        "Update modem sms_count: modem={modem_index} dbus_modem_id={dbus_modem_id} sms_count={sms_count}"
-    )
-}
-
-pub fn mqtt_publish_message_select_control_message(
-    modem_index: u32,
-    dbus_modem_id: &str,
-    picked_index: Option<u32>,
-    max_index: u32,
-    writable: bool,
-) -> String {
-    format!(
-        "Update modem message_select: modem={modem_index} dbus_modem_id={dbus_modem_id} picked_index={} max_index={max_index} writable={writable}",
-        picked_index
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "None".to_string()),
-    )
-}
-
-pub fn mqtt_publish_picked_sms_message(
-    modem_index: u32,
-    dbus_modem_id: &str,
-    snapshot_summary: Option<&str>,
-) -> String {
-    match snapshot_summary {
-        Some(snapshot_summary) => format!(
-            "Update picked SMS: modem={modem_index} dbus_modem_id={dbus_modem_id} {snapshot_summary}"
-        ),
-        None => {
-            format!("Update picked SMS: modem={modem_index} dbus_modem_id={dbus_modem_id} None")
-        }
+pub(super) fn manager_status_payload(status: Option<crate::domain::ManagerStatus>) -> &'static str {
+    match status {
+        Some(crate::domain::ManagerStatus::Active) => "active",
+        Some(crate::domain::ManagerStatus::Inactive) => "inactive",
+        None => "not_found_on_dbus",
     }
 }
 
-pub fn mqtt_delete_modem_device_message(modem_index: u32, dbus_modem_id: &str) -> String {
-    format!("Delete modem device: modem={modem_index} dbus_modem_id={dbus_modem_id}")
+pub(super) fn format_timestamp_for_wb(value: time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+    )
 }
 
 pub fn mm_availability_topic() -> String {

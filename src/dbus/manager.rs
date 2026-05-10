@@ -11,10 +11,11 @@ use zbus::{
 };
 
 use super::connection::emit_event;
-use super::modem::{ModemWatcher, delete_sms, query_sms_snapshot};
+use super::logstrings;
+use super::modem::ModemWatcher;
+use super::sms::{delete_sms, query_sms_snapshot};
 use crate::dbus::schema;
-use crate::dbus::schema::LOG_TARGET;
-use crate::exchange::{DbusCommand, DbusEvent};
+use crate::domain::{DbusCommand, DbusEvent};
 
 #[derive(Default)]
 struct ManagerState {
@@ -187,7 +188,7 @@ impl ManagerWatcher {
         {
             *current_version = version.clone();
             let update = schema::ManagerUpdate::Version(version);
-            info!(target: LOG_TARGET, "{}", schema::manager_update_message(&update));
+            info!(target: logstrings::LOG_TARGET, "{}", logstrings::manager_update_message(&update));
             emit_event(event_tx, DbusEvent::ManagerUpdated(update)).await;
         }
     }
@@ -220,7 +221,7 @@ impl ManagerWatcher {
     ) -> Result<()> {
         if let Some(modem_id) = removed_modem {
             self.state.remove_modem(&modem_id);
-            info!(target: LOG_TARGET, "{}", schema::modem_deleted_message(&modem_id));
+            info!(target: logstrings::LOG_TARGET, "{}", logstrings::modem_deleted_message(&modem_id));
             emit_event(event_tx, DbusEvent::ModemDeleted { modem_id }).await;
             self.sync_modem_count(event_tx).await?;
         }
@@ -275,7 +276,7 @@ impl ManagerWatcher {
         match self.state.modem_count {
             None => {
                 self.state.modem_count = Some(modem_count);
-                info!(target: LOG_TARGET, "{}", schema::manager_found_message(&version, modem_count));
+                info!(target: logstrings::LOG_TARGET, "{}", logstrings::manager_found_message(&version, modem_count));
                 emit_event(
                     event_tx,
                     DbusEvent::ManagerFound {
@@ -288,7 +289,7 @@ impl ManagerWatcher {
             Some(current_count) if current_count != modem_count => {
                 self.state.modem_count = Some(modem_count);
                 let update = schema::ManagerUpdate::ModemCount(modem_count);
-                info!(target: LOG_TARGET, "{}", schema::manager_update_message(&update));
+                info!(target: logstrings::LOG_TARGET, "{}", logstrings::manager_update_message(&update));
                 emit_event(event_tx, DbusEvent::ManagerUpdated(update)).await;
             }
             Some(_) => {}

@@ -1,9 +1,8 @@
 mod cli;
+mod common;
 mod dbus;
-mod exchange;
+mod domain;
 mod mqtt;
-mod shutdown;
-mod tresher;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -15,15 +14,14 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
-use crate::shutdown::wait_for_shutdown;
+use crate::common::wait_for_shutdown;
+use crate::domain::DbusCommand;
 
 const LOG_TARGET: &str = "MAIN";
 
 const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
 const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
-const MQTT_MESSAGE_CHANNEL_CAPACITY: usize = 32;
-const MQTT_EVENT_CHANNEL_CAPACITY: usize = 32;
 const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
@@ -80,8 +78,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Starts MQTT, dispatcher, and DBus sessions and restarts them according to
-/// the configured reconnect intervals.
+/// Starts MQTT and DBus sessions and restarts them according to the configured
+/// reconnect intervals.
 async fn run_supervisor(
     dbus_address: Option<String>,
     mqtt_address: Option<String>,
@@ -95,22 +93,13 @@ async fn run_supervisor(
         }
 
         let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
-        let (mqtt_event_tx, mqtt_event_rx) = mpsc::channel(MQTT_EVENT_CHANNEL_CAPACITY);
-        let (mqtt_message_tx, mqtt_message_rx) = mpsc::channel(MQTT_MESSAGE_CHANNEL_CAPACITY);
         let (actual_dbus_command_tx, actual_dbus_command_rx) =
-            watch::channel(None::<mpsc::Sender<exchange::DbusCommand>>);
+            watch::channel(None::<mpsc::Sender<DbusCommand>>);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
         let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
             mqtt_address.clone(),
             mqtt_stop_rx.clone(),
-            mqtt_message_rx,
-            mqtt_event_tx,
-        ));
-        let tresher_task = tokio::spawn(tresher::run(
-            mqtt_stop_rx,
             dbus_event_rx,
-            mqtt_event_rx,
-            mqtt_message_tx,
             actual_dbus_command_rx,
         ));
 
@@ -125,12 +114,10 @@ async fn run_supervisor(
         .await?
         {
             dbus::LifecycleExit::Shutdown => {
-                stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
                 return Ok(());
             }
             dbus::LifecycleExit::MqttEnded => {
-                stop_child_task("Tresher", mqtt_stop_tx.clone(), tresher_task).await?;
                 let delay = reconnect_delay(
                     mqtt_retry_attempt,
                     MQTT_RECONNECT_FAST_INTERVAL,

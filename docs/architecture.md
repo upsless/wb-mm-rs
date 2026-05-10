@@ -27,8 +27,8 @@ mapping ideas, and cleanup semantics, but not as a structural template.
 - Connects to ModemManager.
 - Performs initial discovery and state loading.
 - Subscribes to DBus events.
-- Executes DBus method calls requested by the dispatcher.
-- Emits domain events to the dispatcher.
+- Executes DBus method calls requested by the MQTT frontend.
+- Emits domain events directly into the MQTT session.
 
 Current DBus implementation is split by responsibility:
 
@@ -37,16 +37,19 @@ Current DBus implementation is split by responsibility:
   and stop cleanly when the bus/session fails or shutdown is requested.
 - `src/dbus/runtime.rs` owns the DBus-specific orchestration layer:
   `DbusRuntime` keeps the `org.freedesktop.DBus` proxy, the ModemManager
-  owner-change stream, the dispatcher sender, and the embedded
+  owner-change stream, the DBus event sender, and the embedded
   `ManagerWatcher`.
 - `src/dbus/manager.rs` owns ModemManager-specific runtime state and behavior:
   manager presence, active manager streams, discovered modem watchers, manager
   event handling, and manager-level DBus command routing.
-- `src/dbus/modem.rs` owns modem and SMS watcher work: per-modem proxy setup,
-  modem property streams, SMS inventory watching, tracked SMS watching, and
-  DBus modem/SMS method calls.
-- `src/dbus/schema.rs` owns DBus/domain vocabulary: object/interface names,
-  typed ids, snapshots, updates, parsers, mappings, and log message helpers.
+- `src/dbus/modem.rs` owns modem watcher work: per-modem proxy setup, modem
+  property streams, modem snapshot/update emission, and SMS watcher startup.
+- `src/dbus/sms.rs` owns SMS watcher work: SMS inventory watching, single-SMS
+  watching, and DBus SMS method calls.
+- `src/dbus/schema.rs` owns DBus-specific vocabulary: object/interface names,
+  signal specs, DBus path helpers, and DBus-side mappings.
+- `src/dbus/logstrings.rs` owns DBus log targets and DBus-side log message
+  text.
 
 The outer loop deliberately remains in `connection.rs`: it is the process-level
 control flow for the DBus subsystem. `DbusRuntime` provides the next
@@ -64,9 +67,9 @@ the behavior boundary is clearer.
 
 - Creates Wiren Board devices and controls.
 - Publishes initial metadata and values.
-- Publishes value updates from dispatcher commands.
+- Applies DBus events to the frontend projection and publishes the result.
 - Observes user writes to writable controls.
-- Emits user actions to the dispatcher.
+- Emits DBus commands directly to the current DBus session sender.
 - Removes or marks generated entities on daemon shutdown, according to the
   chosen Wiren Board behavior.
 - Sets MQTT Last Will so that an unexpected daemon stop marks ModemManager as
@@ -76,27 +79,97 @@ Current MQTT implementation is also split by responsibility:
 
 - `src/mqtt.rs` owns MQTT session lifecycle: option building, Last Will setup,
   frontend startup, graceful stop, and integration of the MQTT event loop with
-  command and shutdown channels.
+  DBus event intake, DBus command watch updates, and shutdown handling.
 - `src/mqtt/loop.rs` owns the low-level rumqtt event loop polling and forwards
   incoming publishes into the frontend pipeline.
-- `src/mqtt/frontend.rs` owns MQTT-side command handling and user-write
-  processing.
+- `src/mqtt/frontend.rs` owns MQTT-side DBus event handling, user-write
+  processing, and direct DBus command emission.
 - `src/mqtt/publish.rs` owns retained publish/cleanup helpers and
   publication-only state.
 - `src/mqtt/state.rs` owns the frontend state model.
 
-### Dispatcher
+### Shared Vocabulary
 
-- Owns high-level daemon state.
-- Receives events from DBus and MQTT handlers.
-- Applies business rules.
-- Sends commands to DBus and MQTT handlers.
+- `src/domain.rs` owns the shared cross-subsystem domain vocabulary.
+- `DbusEvent` flows from DBus into MQTT.
+- `DbusCommand` flows from MQTT back into DBus.
+- `src/common.rs` now stays deliberately small and holds only truly shared
+  runtime helpers such as `wait_for_shutdown()`.
 
-The initial mental model is:
+The current mental model is:
 
 ```text
-DBus events + MQTT user actions -> dispatcher state -> DBus/MQTT commands
+DBus events -> MQTT frontend/state -> DBus commands
 ```
+
+## SMS Ordering Options
+
+SMS ordering is no longer allowed to rely on raw DBus SMS ids alone: the modem
+may reuse a freed numeric SMS slot, so `max(dbus_id)` is not a reliable "most
+recent SMS" criterion.
+
+Two architecture variants are currently considered valid:
+
+1. DBus-side full SMS snapshot cache:
+   - DBus reads all fields for all SMS during modem inventory initialization;
+   - DBus keeps an in-memory full snapshot and emits rich incremental updates;
+   - MQTT consumes already complete SMS data and no longer needs selection-time
+     snapshot requests.
+2. DBus-side inventory facts, MQTT-side ordering:
+   - DBus reads at least `sms_id` plus receive timestamp for every SMS in the
+     inventory;
+   - DBus keeps lightweight per-modem inventory metadata so timestamp is read
+     only for newly added SMS ids, while removed ids are dropped from that
+     metadata cache;
+   - DBus sends those facts without imposing UI-specific order;
+   - MQTT/frontend sorts inventory entries for presentation using
+     `(timestamp, dbus_id)`, treating `timestamp=None` as oldest;
+   - `last_received_sms_dbus_id` is then derived on the MQTT side from that
+     receive-time ordering.
+
+At the moment, variant 2 is the more developed design option because it keeps
+UI ordering responsibility in MQTT while still giving the frontend enough facts
+to sort correctly. Variant 1 remains open for later choice because it may offer
+useful operational benefits despite a slower initial inventory load.
+
+### Full-Cache Evolution Path
+
+If the daemon moves to variant 1, the most promising shape is a DBus-side
+truth cache per modem:
+
+- initial inventory load reads full `SmsSnapshot` data for every SMS object;
+- DBus stores `HashMap<SmsId, SmsSnapshot>` plus inventory membership/order
+  metadata;
+- MQTT receives initial full inventory plus incremental upsert/delete-style
+  events;
+- the current `RefreshSms` request/response path can then disappear or shrink
+  drastically.
+
+This is attractive because once inventory initialization already needs one
+DBus round-trip per SMS object for timestamp-aware ordering, switching from
+"fetch one field" to "fetch full snapshot" becomes much less expensive
+architecturally, while removing a large amount of asynchronous selection-time
+complexity from MQTT.
+
+The risky part is live cache maintenance. Two sub-variants are worth keeping in
+mind:
+
+1. One `PropertiesChanged` subscription per SMS object:
+   - simpler object-local update logic;
+   - still only one watcher per SMS, not one watcher per property;
+   - scales with the number of SMS objects.
+2. One shared low-level `PropertiesChanged` signal stream for all SMS objects:
+   - one central event loop updates the whole SMS cache;
+   - avoids a per-SMS watcher set;
+   - requires more manual DBus signal parsing and filtering.
+
+This full-cache direction is promising but should be treated as a deliberate,
+riskier architectural refactor rather than the next incremental patch. The
+current low-risk evolution path remains variant 2:
+
+- DBus emits inventory entries/facts;
+- MQTT sorts them for UI use;
+- MQTT requests a snapshot only for the currently needed SMS.
 
 ## Lifecycle Model
 
@@ -109,11 +182,9 @@ Runtime shape:
 ```text
 connect MQTT
   -> publish meta / set Last Will
-  -> start dispatcher
   -> start DBus handler
   -> run until MQTT disconnect
   -> stop DBus handler
-  -> stop dispatcher runtime session
   -> drop live runtime state
   -> retry MQTT
 ```
@@ -157,10 +228,16 @@ should live in compact, easy-to-review mapping definitions.
 
 Current Rust naming uses `schema.rs` for these compact vocabularies:
 
-- `src/dbus/schema.rs` for DBus/domain ids, snapshots, updates, parsers, and
-  log message helpers;
-- `src/mqtt/schema.rs` for MQTT topic/control schema, payload helpers, and log
-  message helpers.
+- `src/domain.rs` for shared domain ids, snapshots, updates, and DBus/MQTT
+  exchange enums;
+- `src/dbus/schema.rs` for DBus-specific constants, signal specs, and path
+  helpers;
+- `src/mqtt/schema.rs` for MQTT topic/control schema and payload helpers.
+
+Logging text now lives alongside each subsystem in dedicated files:
+
+- `src/dbus/logstrings.rs` for DBus-side log messages and log target names;
+- `src/mqtt/logstrings.rs` for MQTT-side log messages and log target names.
 
 Prefer typed data structures or small declarative config over ad hoc string
 manipulation.
@@ -184,7 +261,7 @@ Development logging should be very detailed, at least as useful as
 - device/control creation and cleanup;
 - Last Will setup;
 - DBus discovery and property/event handling;
-- dispatcher decisions and emitted commands.
+- frontend state decisions and emitted DBus commands.
 
 The logging level should be configurable so normal production operation does
 not produce chatty traces, while development can enable full trace/debug output.

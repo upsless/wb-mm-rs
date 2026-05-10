@@ -5,11 +5,10 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::dbus::{
-    ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate,
-};
-use crate::exchange::{MqttCommand, MqttEvent};
-use crate::mqtt::r#loop::{LOG_TARGET, MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY, eventloop_result};
+use crate::dbus::{ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate};
+use crate::domain::{DbusCommand, DbusEvent, SmsInventoryEntry};
+use crate::mqtt::logstrings;
+use crate::mqtt::r#loop::{MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY, eventloop_result};
 use crate::mqtt::publish::{MqttPublisher, UnavailableModemPublishState};
 use crate::mqtt::schema;
 use crate::mqtt::state::{MqttModemSmsState, MqttSessionState, max_message_select_index};
@@ -43,58 +42,49 @@ impl MqttFrontend {
         eventloop_result(eventloop_task.await)
     }
 
-    pub(super) async fn handle_command(
+    pub(super) async fn handle_dbus_event(
         &mut self,
-        command: MqttCommand,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        event: DbusEvent,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
-        match command {
-            MqttCommand::ManagerFound {
+        match event {
+            DbusEvent::ManagerFound {
                 version,
                 modem_count,
             } => {
                 self.handle_manager_found(version, modem_count).await?;
             }
-            MqttCommand::ManagerUpdated(update) => {
+            DbusEvent::ManagerUpdated(update) => {
                 self.handle_manager_update(update).await?;
             }
-            MqttCommand::ManagerDeleted => {
+            DbusEvent::ManagerDeleted => {
                 self.handle_manager_deleted().await?;
             }
-            MqttCommand::ModemFound { modem_id, info } => {
+            DbusEvent::ModemFound { modem_id, info } => {
                 self.handle_modem_found(modem_id, info).await?;
             }
-            MqttCommand::ModemUpdated { modem_id, update } => {
+            DbusEvent::ModemUpdated { modem_id, update } => {
                 self.handle_modem_update(modem_id, update).await?;
             }
-            MqttCommand::PublishSmsInventorySnapshot {
-                modem_id,
-                sms_ids,
-                initial_sms_snapshot,
-            } => {
-                self.handle_sms_inventory_snapshot(
-                    modem_id,
-                    sms_ids,
-                    initial_sms_snapshot,
-                    mqtt_event_tx,
-                )
-                .await?;
-            }
-            MqttCommand::PublishSmsList { modem_id, sms_ids } => {
-                self.handle_sms_list(modem_id, sms_ids, None, mqtt_event_tx)
+            DbusEvent::SmsInventorySnapshot { modem_id, entries } => {
+                self.handle_sms_inventory_snapshot(modem_id, entries, dbus_command_tx)
                     .await?;
             }
-            MqttCommand::PublishSmsSnapshot { modem_id, snapshot } => {
+            DbusEvent::SmsListChanged { modem_id, entries } => {
+                self.handle_sms_list(modem_id, entries, dbus_command_tx)
+                    .await?;
+            }
+            DbusEvent::SmsSnapshot { modem_id, snapshot } => {
                 self.handle_sms_snapshot(modem_id, snapshot).await?;
             }
-            MqttCommand::PublishSmsUpdate { modem_id, update } => {
+            DbusEvent::SmsPropertyChanged { modem_id, update } => {
                 self.handle_sms_update(modem_id, update).await?;
             }
-            MqttCommand::PublishSmsDeleted { modem_id, sms_id } => {
-                self.apply_sms_deleted(modem_id, sms_id, mqtt_event_tx)
+            DbusEvent::SmsDeleted { modem_id, sms_id } => {
+                self.apply_sms_deleted(modem_id, sms_id, dbus_command_tx)
                     .await?;
             }
-            MqttCommand::ModemDeleted { modem_id } => {
+            DbusEvent::ModemDeleted { modem_id } => {
                 self.handle_modem_deleted(modem_id).await?;
             }
         }
@@ -105,7 +95,7 @@ impl MqttFrontend {
     pub(super) async fn handle_incoming_publish(
         &mut self,
         publish: Publish,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         if let Some(modem_index) = parse_message_select_topic(&publish.topic) {
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
@@ -119,7 +109,7 @@ impl MqttFrontend {
             // the DBus SMS id before asking DBus for fresh data.
             let Ok(payload) = std::str::from_utf8(&publish.payload) else {
                 debug!(
-                    target: LOG_TARGET,
+                    target: logstrings::LOG_TARGET,
                     "Ignoring non-UTF8 message_select payload in topic `{}`",
                     publish.topic
                 );
@@ -128,14 +118,14 @@ impl MqttFrontend {
             let payload = payload.trim();
             let Ok(picked_index) = payload.parse::<u32>() else {
                 debug!(
-                    target: LOG_TARGET,
+                    target: logstrings::LOG_TARGET,
                     "Ignoring invalid message_select payload `{payload}` in topic `{}`",
                     publish.topic
                 );
                 return Ok(());
             };
 
-            self.pick_modem_sms(modem_id, picked_index, mqtt_event_tx)
+            self.pick_modem_sms(modem_id, picked_index, dbus_command_tx)
                 .await?;
 
             return Ok(());
@@ -149,7 +139,7 @@ impl MqttFrontend {
                 return Ok(());
             }
 
-            self.delete_picked_sms(modem_id, mqtt_event_tx).await?;
+            self.delete_picked_sms(modem_id, dbus_command_tx).await?;
         }
 
         Ok(())
@@ -158,7 +148,7 @@ impl MqttFrontend {
     fn accepts_modem_user_write(&self, modem_id: &ModemId, control_name: &str) -> bool {
         if !self.state.manager_available {
             debug!(
-                target: LOG_TARGET,
+                target: logstrings::LOG_TARGET,
                 "Ignoring {control_name} write while ModemManager is unavailable"
             );
             return false;
@@ -166,7 +156,7 @@ impl MqttFrontend {
 
         if !self.state.modem_is_active(modem_id) {
             debug!(
-                target: LOG_TARGET,
+                target: logstrings::LOG_TARGET,
                 "Ignoring {control_name} write for inactive modem {}",
                 modem_id.0
             );
@@ -189,7 +179,7 @@ impl MqttFrontend {
         self.publisher.ensure_main_device().await?;
         match update {
             ManagerUpdate::Status(status) => {
-                let manager_available = modemmanager_is_available(status);
+                let manager_available = schema::modemmanager_is_available(status);
                 self.state.manager_available = manager_available;
                 self.publisher.publish_manager_status(Some(status)).await?;
                 if !manager_available {
@@ -253,9 +243,9 @@ impl MqttFrontend {
         self.publisher.cleanup_modem_device(modem_index).await?;
         self.sync_main_sms_state().await?;
         info!(
-            target: LOG_TARGET,
+            target: logstrings::LOG_TARGET,
             "{}",
-            schema::mqtt_delete_modem_device_message(modem_index, &modem_id.0)
+            logstrings::mqtt_delete_modem_device_message(modem_index, &modem_id.0)
         );
         Ok(())
     }
@@ -263,25 +253,26 @@ impl MqttFrontend {
     async fn handle_sms_inventory_snapshot(
         &mut self,
         modem_id: ModemId,
-        sms_ids: Vec<SmsId>,
-        initial_sms_snapshot: Option<SmsSnapshot>,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        entries: Vec<SmsInventoryEntry>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         let Some(modem) = self.state.modems.get_mut(&modem_id) else {
             return Ok(());
         };
-        modem.ensure_sms_state();
-        self.handle_sms_list(modem_id, sms_ids, initial_sms_snapshot, mqtt_event_tx)
+        if modem.sms_state.is_none() {
+            modem.sms_state = Some(MqttModemSmsState::default());
+        }
+        self.handle_sms_list(modem_id, entries, dbus_command_tx)
             .await
     }
 
     async fn handle_sms_list(
         &mut self,
         modem_id: ModemId,
-        sms_ids: Vec<SmsId>,
-        initial_sms_snapshot: Option<SmsSnapshot>,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        entries: Vec<SmsInventoryEntry>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
+        let sms_ids = sorted_sms_ids(entries);
         let picked_sms_id = {
             let Some(modem_sms) = self
                 .state
@@ -295,10 +286,6 @@ impl MqttFrontend {
         };
 
         self.sync_modem_sms_state(&modem_id).await?;
-        if let Some(snapshot) = initial_sms_snapshot {
-            self.handle_sms_snapshot(modem_id.clone(), snapshot).await?;
-        }
-
         let request_sms_id = picked_sms_id.filter(|picked_sms_id| {
             self.state
                 .modems
@@ -307,7 +294,7 @@ impl MqttFrontend {
                 .and_then(MqttModemSmsState::displayed_sms_id)
                 != Some(picked_sms_id)
         });
-        self.finish_synced_sms_change(modem_id, request_sms_id, true, mqtt_event_tx)
+        self.finish_synced_sms_change(modem_id, request_sms_id, true, dbus_command_tx)
             .await
     }
 
@@ -380,7 +367,7 @@ impl MqttFrontend {
         &mut self,
         modem_id: ModemId,
         sms_id: SmsId,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         let request_sms_id = {
             let Some(modem_sms) = self
@@ -395,7 +382,7 @@ impl MqttFrontend {
         };
 
         self.sync_modem_sms_state(&modem_id).await?;
-        self.finish_synced_sms_change(modem_id, request_sms_id, true, mqtt_event_tx)
+        self.finish_synced_sms_change(modem_id, request_sms_id, true, dbus_command_tx)
             .await
     }
 
@@ -403,7 +390,7 @@ impl MqttFrontend {
         &mut self,
         modem_id: ModemId,
         picked_index: u32,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         let request_sms_id = self
             .state
@@ -413,14 +400,14 @@ impl MqttFrontend {
             .and_then(|modem_sms| modem_sms.update_picked_sms_index(picked_index));
 
         self.sync_modem_sms_state(&modem_id).await?;
-        self.finish_synced_sms_change(modem_id, request_sms_id, false, mqtt_event_tx)
+        self.finish_synced_sms_change(modem_id, request_sms_id, false, dbus_command_tx)
             .await
     }
 
     async fn delete_picked_sms(
         &mut self,
         modem_id: ModemId,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         let Some(sms_id) = self
             .state
@@ -433,7 +420,7 @@ impl MqttFrontend {
         };
 
         self.set_delete_message_writable(&modem_id, false).await?;
-        send_mqtt_event(mqtt_event_tx, MqttEvent::DeleteSms { modem_id, sms_id }).await;
+        send_dbus_command(dbus_command_tx, DbusCommand::DeleteSms { modem_id, sms_id }).await;
         Ok(())
     }
 
@@ -442,7 +429,7 @@ impl MqttFrontend {
         modem_id: ModemId,
         request_sms_id: Option<SmsId>,
         sync_main_sms_state: bool,
-        mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         if request_sms_id.is_some() {
             self.set_delete_message_writable(&modem_id, false).await?;
@@ -451,7 +438,7 @@ impl MqttFrontend {
             self.sync_main_sms_state().await?;
         }
         if let Some(sms_id) = request_sms_id {
-            request_sms_snapshot(mqtt_event_tx, modem_id, sms_id).await;
+            request_sms_snapshot(dbus_command_tx, modem_id, sms_id).await;
         }
 
         Ok(())
@@ -549,39 +536,56 @@ fn parse_modem_control_on_topic(topic: &str, control_name: &str) -> Option<u32> 
     modem_index.parse::<u32>().ok()
 }
 
-pub(super) fn modemmanager_is_available(status: ManagerStatus) -> bool {
-    matches!(status, ManagerStatus::Active)
-}
+async fn send_dbus_command(
+    dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
+    command: DbusCommand,
+) {
+    let Some(dbus_command_tx) = dbus_command_tx else {
+        return;
+    };
 
-pub(super) fn manager_status_payload(status: Option<ManagerStatus>) -> &'static str {
-    match status {
-        Some(ManagerStatus::Active) => "active",
-        Some(ManagerStatus::Inactive) => "inactive",
-        None => "not_found_on_dbus",
-    }
-}
-
-async fn send_mqtt_event(mqtt_event_tx: &mpsc::Sender<MqttEvent>, event: MqttEvent) {
-    if mqtt_event_tx.send(event).await.is_err() {
-        debug!(target: LOG_TARGET, "MQTT event channel closed while sending");
+    if dbus_command_tx.send(command).await.is_err() {
+        debug!(target: logstrings::LOG_TARGET, "DBus command channel closed while sending");
     }
 }
 
 async fn request_sms_snapshot(
-    mqtt_event_tx: &mpsc::Sender<MqttEvent>,
+    dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     modem_id: ModemId,
     sms_id: SmsId,
 ) {
-    send_mqtt_event(
-        mqtt_event_tx,
-        MqttEvent::RequestSmsSnapshot { modem_id, sms_id },
+    send_dbus_command(
+        dbus_command_tx,
+        DbusCommand::RefreshSms { modem_id, sms_id },
     )
     .await;
 }
 
+fn sorted_sms_ids(mut entries: Vec<SmsInventoryEntry>) -> Vec<SmsId> {
+    entries.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| compare_sms_ids(&left.sms_id, &right.sms_id))
+    });
+
+    entries.into_iter().map(|entry| entry.sms_id).collect()
+}
+
+fn compare_sms_ids(left: &SmsId, right: &SmsId) -> std::cmp::Ordering {
+    match (left.0.parse::<u32>(), right.0.parse::<u32>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.0.cmp(&right.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_delete_picked_sms_topic, parse_message_select_topic};
+    use super::{
+        compare_sms_ids, parse_delete_picked_sms_topic, parse_message_select_topic, sorted_sms_ids,
+    };
+    use crate::dbus::SmsId;
+    use crate::domain::SmsInventoryEntry;
+    use time::OffsetDateTime;
 
     #[test]
     fn parses_message_select_topic() {
@@ -605,5 +609,45 @@ mod tests {
             parse_delete_picked_sms_topic("/devices/mm_modem_3/controls/message_select/on"),
             None
         );
+    }
+
+    #[test]
+    fn sorts_sms_inventory_by_timestamp_then_dbus_id() {
+        let sms_ids = sorted_sms_ids(vec![
+            entry("7", None),
+            entry("12", Some(20)),
+            entry("9", Some(20)),
+            entry("3", Some(10)),
+        ]);
+
+        assert_eq!(
+            sms_ids,
+            vec![sms_id("7"), sms_id("3"), sms_id("9"), sms_id("12")]
+        );
+    }
+
+    #[test]
+    fn compares_sms_ids_numerically_when_possible() {
+        assert_eq!(
+            compare_sms_ids(&sms_id("9"), &sms_id("12")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_sms_ids(&sms_id("x2"), &sms_id("x10")),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    fn entry(value: &str, timestamp: Option<i64>) -> SmsInventoryEntry {
+        SmsInventoryEntry {
+            sms_id: sms_id(value),
+            timestamp: timestamp.map(|value| {
+                OffsetDateTime::from_unix_timestamp(value).expect("test timestamp should be valid")
+            }),
+        }
+    }
+
+    fn sms_id(value: &str) -> SmsId {
+        SmsId(value.to_string())
     }
 }

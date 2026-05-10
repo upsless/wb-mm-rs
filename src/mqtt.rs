@@ -1,4 +1,5 @@
 mod frontend;
+mod logstrings;
 mod r#loop;
 mod publish;
 mod schema;
@@ -6,14 +7,13 @@ mod state;
 
 use anyhow::{Context, Result, bail};
 use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS, Transport};
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
-use crate::exchange::{MqttCommand, MqttEvent};
+use crate::common::wait_for_shutdown;
+use crate::domain::{DbusCommand, DbusEvent};
 use crate::mqtt::frontend::MqttFrontend;
 use crate::mqtt::publish::switch_payload;
-use crate::shutdown::wait_for_shutdown;
 
 const DEFAULT_MQTT_ADDRESS: &str = "unix:///var/run/mosquitto/mosquitto.sock";
 const DEFAULT_MQTT_PORT: u16 = 1883;
@@ -25,8 +25,8 @@ const MQTT_INCOMING_CHANNEL_CAPACITY: usize = 32;
 pub async fn run_lifecycle(
     mqtt_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
-    mut command_rx: mpsc::Receiver<MqttCommand>,
-    mqtt_event_tx: mpsc::Sender<MqttEvent>,
+    mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
+    mut dbus_command_rx: watch::Receiver<Option<mpsc::Sender<DbusCommand>>>,
 ) -> Result<()> {
     let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
     let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
@@ -48,20 +48,30 @@ pub async fn run_lifecycle(
                 frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
                 break;
             }
-            maybe_command = command_rx.recv() => {
-                let Some(command) = maybe_command else {
+            maybe_event = dbus_event_rx.recv() => {
+                let Some(event) = maybe_event else {
                     frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
                     break;
                 };
-                frontend.handle_command(command, &mqtt_event_tx).await?;
+                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
+                frontend
+                    .handle_dbus_event(event, current_dbus_command_tx.as_ref())
+                    .await?;
             }
             maybe_publish = incoming_publish_rx.recv() => {
                 let Some(publish) = maybe_publish else {
                     return Ok(());
                 };
+                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
                 frontend
-                    .handle_incoming_publish(publish, &mqtt_event_tx)
+                    .handle_incoming_publish(publish, current_dbus_command_tx.as_ref())
                     .await?;
+            }
+            changed = dbus_command_rx.changed() => {
+                if changed.is_err() {
+                    frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
+                    break;
+                }
             }
             result = &mut eventloop_task => {
                 return r#loop::eventloop_result(result);
@@ -69,7 +79,7 @@ pub async fn run_lifecycle(
         }
     }
 
-    debug!(target: r#loop::LOG_TARGET, "{}", schema::mqtt_stopped_message());
+    debug!(target: logstrings::LOG_TARGET, "{}", logstrings::mqtt_stopped_message());
 
     Ok(())
 }

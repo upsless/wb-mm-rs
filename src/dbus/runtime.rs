@@ -9,10 +9,10 @@ use zbus::{
     proxy::PropertyStream,
 };
 
+use super::logstrings;
 use super::manager::{ManagerPresence, ManagerWatcher};
 use crate::dbus::schema;
-use crate::dbus::schema::LOG_TARGET;
-use crate::exchange::DbusEvent;
+use crate::domain::DbusEvent;
 
 pub(super) use super::manager::{LoopFlow, ManagerLoopEvent};
 
@@ -20,7 +20,7 @@ pub(super) struct DbusRuntime {
     dbus_proxy: DBusProxy<'static>,
     manager_owner_changes: NameOwnerChangedStream,
     event_tx: mpsc::Sender<DbusEvent>,
-    modem_manager: ManagerWatcher,
+    pub(super) modem_manager: ManagerWatcher,
 }
 
 impl DbusRuntime {
@@ -112,17 +112,17 @@ impl DbusRuntime {
             ManagerLoopEvent::Shutdown => Ok(LoopFlow::Stop),
             ManagerLoopEvent::OwnerStreamClosed => {
                 debug!(
-                    target: LOG_TARGET,
+                    target: logstrings::LOG_TARGET,
                     "{}",
-                    schema::dbus_signal_stream_closed_message(schema::MM_NAME_OWNER_CHANGED_SIGNAL)
+                    logstrings::dbus_signal_stream_closed_message(schema::MM_NAME_OWNER_CHANGED_SIGNAL)
                 );
                 Ok(LoopFlow::Stop)
             }
             ManagerLoopEvent::ActiveStreamClosed(signal_id) => {
                 debug!(
-                    target: LOG_TARGET,
+                    target: logstrings::LOG_TARGET,
                     "{}",
-                    schema::dbus_signal_stream_closed_message(signal_id)
+                    logstrings::dbus_signal_stream_closed_message(signal_id)
                 );
                 self.modem_manager.reset();
                 Ok(LoopFlow::Continue)
@@ -161,10 +161,6 @@ impl DbusRuntime {
                 Ok(LoopFlow::Continue)
             }
         }
-    }
-
-    pub(super) fn reset_manager(&mut self) {
-        self.modem_manager.reset();
     }
 
     async fn handle_owner_changed(&mut self) -> Result<()> {
@@ -272,12 +268,12 @@ async fn query_manager_presence(dbus_proxy: &DBusProxy<'_>) -> Result<ManagerPre
 async fn emit_manager_presence(event_tx: &mpsc::Sender<DbusEvent>, presence: ManagerPresence) {
     match presence {
         ManagerPresence::Present(status) => {
-            tracing::info!(target: LOG_TARGET, "{}", schema::modemmanager_status_message(status));
+            tracing::info!(target: logstrings::LOG_TARGET, "{}", logstrings::modemmanager_status_message(status));
             let update = schema::ManagerUpdate::Status(status);
             super::connection::emit_event(event_tx, DbusEvent::ManagerUpdated(update)).await;
         }
         ManagerPresence::Absent => {
-            tracing::info!(target: LOG_TARGET, "{}", schema::manager_deleted_message());
+            tracing::info!(target: logstrings::LOG_TARGET, "{}", logstrings::manager_deleted_message());
             super::connection::emit_event(event_tx, DbusEvent::ManagerDeleted).await;
         }
     }
