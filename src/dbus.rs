@@ -11,19 +11,17 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
-use crate::common::wait_for_shutdown;
+use crate::common::{
+    DBUS_COMMAND_CHANNEL_CAPACITY, DBUS_RECONNECT_FAST_ATTEMPTS, DBUS_RECONNECT_FAST_INTERVAL,
+    DBUS_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+};
 use crate::domain::{DbusCommand, DbusEvent};
 
 pub use crate::domain::{
-    ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsPropertyChange,
-    SmsSnapshot, SmsUpdate,
+    ManagerStatus, ManagerUpdate, ModemId, ModemInfo, ModemUpdate, OutgoingSmsInfo,
+    OutgoingSmsStatus, SmsId, SmsPropertyChange, SmsSnapshot, SmsUpdate,
 };
 pub use logstrings::LOG_TARGET;
-
-const RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
-const RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
-const RECONNECT_FAST_ATTEMPTS: u32 = 24;
-const COMMAND_CHANNEL_CAPACITY: usize = 32;
 
 pub enum LifecycleExit {
     Shutdown,
@@ -46,7 +44,7 @@ pub async fn run_lifecycle(
     let mut retry_attempt = 1;
 
     loop {
-        let (dbus_command_tx, dbus_command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (dbus_command_tx, dbus_command_rx) = mpsc::channel(DBUS_COMMAND_CHANNEL_CAPACITY);
         let _ = command_tx.send(Some(dbus_command_tx));
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
         let mut dbus_task = tokio::spawn(connection::run(
@@ -113,10 +111,10 @@ pub async fn run_lifecycle(
 }
 
 fn reconnect_delay(attempt: u32) -> Duration {
-    if attempt <= RECONNECT_FAST_ATTEMPTS {
-        RECONNECT_FAST_INTERVAL
+    if attempt <= DBUS_RECONNECT_FAST_ATTEMPTS {
+        DBUS_RECONNECT_FAST_INTERVAL
     } else {
-        RECONNECT_SLOW_INTERVAL
+        DBUS_RECONNECT_SLOW_INTERVAL
     }
 }
 

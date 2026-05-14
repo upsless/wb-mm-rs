@@ -1,6 +1,7 @@
 use super::schema::{
     DbusSignalSpec, ManagerStatus, ManagerUpdate, ModemId, ModemUpdate, SmsId, SmsUpdate,
 };
+use crate::domain::OutgoingSmsInfo;
 
 pub const LOG_TARGET: &str = "DBUS";
 
@@ -57,6 +58,14 @@ pub fn sms_property_changed_message(modem_id: &ModemId, update: &SmsUpdate) -> S
 
 pub fn sms_deleted_message(modem_id: &ModemId, sms_id: &SmsId) -> String {
     format!("Modem {} SMS {} deleted from DBus", modem_id.0, sms_id.0)
+}
+
+pub fn outgoing_sms_update_message(modem_id: &ModemId, info: &OutgoingSmsInfo) -> String {
+    format!(
+        "Modem {} outgoing SMS changed: {}",
+        modem_id.0,
+        info.summary()
+    )
 }
 
 pub fn sms_signal_stream_closed_message(signal_id: &str, object_path: &str) -> String {

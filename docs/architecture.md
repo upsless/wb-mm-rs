@@ -88,6 +88,17 @@ Current MQTT implementation is also split by responsibility:
   publication-only state.
 - `src/mqtt/state.rs` owns the frontend state model.
 
+Current modem-level outgoing SMS support intentionally stays separate from the
+incoming SMS picker model:
+
+- MQTT exposes per-modem compose controls (`outgoing_sms_recipient`,
+  `outgoing_sms_text`, `send_sms`) and readonly "last sent" controls above the
+  incoming SMS controls;
+- DBus executes `Create` + `Send` on the modem messaging interface and emits
+  outgoing SMS status updates back into MQTT;
+- the first implementation treats outgoing SMS as a separate action/result
+  channel rather than merging it into the incoming SMS inventory.
+
 ### Shared Vocabulary
 
 - `src/domain.rs` owns the shared cross-subsystem domain vocabulary.

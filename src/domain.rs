@@ -152,6 +152,45 @@ pub struct SmsInventoryEntry {
     pub timestamp: Option<OffsetDateTime>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutgoingSmsStatus {
+    Sending,
+    Sent,
+    Failed,
+}
+
+impl OutgoingSmsStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutgoingSmsStatus::Sending => "sending",
+            OutgoingSmsStatus::Sent => "sent",
+            OutgoingSmsStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingSmsInfo {
+    pub recipient: String,
+    pub text: String,
+    pub timestamp: Option<OffsetDateTime>,
+    pub status: OutgoingSmsStatus,
+    pub error: Option<String>,
+}
+
+impl OutgoingSmsInfo {
+    pub fn summary(&self) -> String {
+        format!(
+            "recipient={}, text={}, timestamp={}, status={}, error={}",
+            self.recipient,
+            format_text_summary(Some(self.text.as_str())),
+            format_option_timestamp(self.timestamp),
+            self.status.as_str(),
+            format_option_string(self.error.as_deref()),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmsUpdate {
     pub sms_id: SmsId,
@@ -226,6 +265,10 @@ pub enum DbusEvent {
         modem_id: ModemId,
         sms_id: SmsId,
     },
+    OutgoingSmsUpdated {
+        modem_id: ModemId,
+        info: OutgoingSmsInfo,
+    },
     SmsInventorySnapshot {
         modem_id: ModemId,
         entries: Vec<SmsInventoryEntry>,
@@ -233,7 +276,19 @@ pub enum DbusEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum DbusCommand {
-    RefreshSms { modem_id: ModemId, sms_id: SmsId },
-    DeleteSms { modem_id: ModemId, sms_id: SmsId },
+    RefreshSms {
+        modem_id: ModemId,
+        sms_id: SmsId,
+    },
+    DeleteSms {
+        modem_id: ModemId,
+        sms_id: SmsId,
+    },
+    SendSms {
+        modem_id: ModemId,
+        recipient: String,
+        text: String,
+    },
 }

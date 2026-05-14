@@ -385,30 +385,34 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 3. Revisit whether `last_received_sms_dbus_id` should remain the final user
    visible control, or whether it should later be complemented by a visible
    "Last Received SMS Date" plus hidden unix-time control.
-4. Implement modem-level outgoing SMS flow as the next user-facing feature:
-   - per modem, provide writable compose controls for recipient and text plus a
-     `send_sms` trigger button;
-   - publish readonly result controls for `last_sent_sms_dbus_id`,
-     `last_sent_sms_timestamp`, hidden unix-time, and `last_sent_sms_status`;
-   - keep outgoing SMS handling separate from the current incoming inventory /
-     picker model for the first implementation;
-   - after that, move on to incoming call signaling/handling.
-5. Figure out how to persist the SMS storage choice that worked manually:
+4. Validate and polish the new modem-level outgoing SMS flow on real hardware:
+   - per modem, writable compose controls now exist for recipient and text plus
+     a `send_sms` trigger button;
+   - readonly result controls now show `last_sent_sms_status`,
+     `last_sent_sms_timestamp`, hidden unix-time, `last_sent_sms_recipient`,
+     and a one-line `last_sent_sms_text`;
+   - outgoing SMS handling is still intentionally separate from the current
+     incoming inventory / picker model;
+   - confirm that the ModemManager `Create` + `Send` path behaves correctly on
+     the target modem and that `sending -> sent/failed` is sufficient for the
+     first release.
+5. After outgoing SMS, move on to incoming call signaling/handling.
+6. Figure out how to persist the SMS storage choice that worked manually:
    `AT+CPMS="ME","ME","ME"` caused the modem to rediscover today's SMS after a
    reboot-like transition, but the daemon should not rely on manual console
    state.
-6. Continue reducing MQTT SMS handler complexity:
+7. Continue reducing MQTT SMS handler complexity:
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-7. Re-check the stale `displayed_sms_id` policy after more cleanup:
+8. Re-check the stale `displayed_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
      also set `displayed_sms_id=None`.
-8. Verify live SMS add/delete/change behavior on a working SIM.
-9. Add focused tests around reconnect/lifecycle ordering where practical.
-10. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+9. Verify live SMS add/delete/change behavior on a working SIM.
+10. Add focused tests around reconnect/lifecycle ordering where practical.
+11. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.
 
 ## Recent DBus Cleanup Notes

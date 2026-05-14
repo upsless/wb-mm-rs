@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use rumqttc::{Event, Packet, Publish};
 use tokio::sync::mpsc;
@@ -7,8 +5,6 @@ use tokio::sync::watch;
 use tracing::debug;
 
 use crate::mqtt::logstrings;
-
-pub(super) const MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) async fn run_eventloop(
     stop_rx: watch::Receiver<bool>,

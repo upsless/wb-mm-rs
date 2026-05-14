@@ -9,7 +9,9 @@ use crate::dbus::{
 };
 use crate::mqtt::logstrings;
 use crate::mqtt::schema::{self, ControlSpec};
-use crate::mqtt::state::{MqttModemSmsState, max_message_select_index};
+use crate::mqtt::state::{
+    MqttLastSentSmsState, MqttModemSmsState, MqttOutgoingSmsState, max_message_select_index,
+};
 
 pub(super) trait IntoMqttPayload {
     fn into_mqtt_payload(self) -> String;
@@ -289,6 +291,17 @@ impl MqttPublisher {
         self.publish_modem_sms_structure(modem_index).await?;
 
         let device_name = schema::device_name_for_modem(modem_index);
+        self.publish_last_sent_sms(modem_index, None).await?;
+        self.publish_outgoing_sms_draft(&device_name, "", "")
+            .await?;
+        self.publish_control(
+            &device_name,
+            schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
+            switch_payload(true),
+        )
+        .await?;
+        self.publish_control(&device_name, schema::MODEM_CONTROL_SEND_SMS, "0")
+            .await?;
         self.publish_control(
             &device_name,
             schema::MODEM_CONTROL_DISPLAYED_SMS_INDEX,
@@ -324,6 +337,10 @@ impl MqttPublisher {
 
         let device_name = schema::device_name_for_modem(modem_index);
         for control_name in [
+            schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
+            schema::MODEM_CONTROL_OUTGOING_SMS_TEXT,
+            schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
+            schema::MODEM_CONTROL_SEND_SMS,
             schema::MODEM_CONTROL_MESSAGE_SELECT,
             schema::MODEM_CONTROL_DELETE_MESSAGE,
         ] {
@@ -374,6 +391,9 @@ impl MqttPublisher {
 
     async fn publish_modem_sms_structure(&self, modem_index: u32) -> Result<()> {
         let device_name = schema::device_name_for_modem(modem_index);
+        for spec in schema::modem_outgoing_sms_control_specs() {
+            self.publish_control_metadata(&device_name, spec).await?;
+        }
         for spec in schema::modem_sms_control_specs() {
             self.publish_control_metadata(&device_name, spec).await?;
         }
@@ -547,6 +567,43 @@ impl MqttPublisher {
                     .await?;
             }
         }
+
+        Ok(())
+    }
+
+    pub(super) async fn sync_modem_outgoing_sms_state(
+        &mut self,
+        modem_id: &ModemId,
+        modem_index: u32,
+        outgoing_sms: &MqttOutgoingSmsState,
+        send_allowed: bool,
+    ) -> Result<()> {
+        self.ensure_modem_sms_controls(modem_id, modem_index)
+            .await?;
+
+        let device_name = schema::device_name_for_modem(modem_index);
+        let can_send = send_allowed && outgoing_sms.is_ready_to_send();
+        let send_spec =
+            schema::dynamic_outgoing_sms_spec(schema::MODEM_CONTROL_SEND_SMS, !can_send);
+        self.publish_control_metadata(&device_name, &send_spec)
+            .await?;
+
+        self.publish_last_sent_sms(modem_index, outgoing_sms.last_sent())
+            .await?;
+        self.publish_outgoing_sms_draft(
+            &device_name,
+            outgoing_sms.recipient(),
+            outgoing_sms.text(),
+        )
+        .await?;
+        self.publish_control(
+            &device_name,
+            schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
+            switch_payload(outgoing_sms.check_phone_format()),
+        )
+        .await?;
+        self.publish_control(&device_name, schema::MODEM_CONTROL_SEND_SMS, "0")
+            .await?;
 
         Ok(())
     }
@@ -833,6 +890,98 @@ impl MqttPublisher {
         Ok(())
     }
 
+    async fn publish_last_sent_sms(
+        &self,
+        modem_index: u32,
+        last_sent: Option<&MqttLastSentSmsState>,
+    ) -> Result<()> {
+        let device_name = schema::device_name_for_modem(modem_index);
+
+        match last_sent {
+            Some(last_sent) => {
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_STATUS,
+                    outgoing_sms_status_payload(last_sent),
+                )
+                .await?;
+                self.publish_optional_timestamp_controls(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP_UNIXTIME,
+                    last_sent.timestamp(),
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_RECIPIENT,
+                    last_sent.recipient(),
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TEXT,
+                    schema::single_line_payload(last_sent.text()),
+                )
+                .await?;
+            }
+            None => {
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_STATUS,
+                    MqttNull,
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP,
+                    MqttNull,
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP_UNIXTIME,
+                    MqttNull,
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_RECIPIENT,
+                    MqttNull,
+                )
+                .await?;
+                self.publish_control(
+                    &device_name,
+                    schema::MODEM_CONTROL_LAST_SENT_SMS_TEXT,
+                    MqttNull,
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn publish_outgoing_sms_draft(
+        &self,
+        device_name: &str,
+        recipient: &str,
+        text: &str,
+    ) -> Result<()> {
+        self.publish_control(
+            device_name,
+            schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
+            draft_text_payload(recipient),
+        )
+        .await?;
+        self.publish_control(
+            device_name,
+            schema::MODEM_CONTROL_OUTGOING_SMS_TEXT,
+            draft_text_payload(text),
+        )
+        .await
+    }
+
     pub(super) async fn publish_sms_update(
         &self,
         modem_index: u32,
@@ -906,6 +1055,9 @@ impl MqttPublisher {
     pub(super) async fn cleanup_modem_device(&mut self, modem_index: u32) -> Result<()> {
         let device_name = schema::device_name_for_modem(modem_index);
         for spec in schema::modem_base_control_specs() {
+            self.cleanup_control(&device_name, spec).await?;
+        }
+        for spec in schema::modem_outgoing_sms_control_specs() {
             self.cleanup_control(&device_name, spec).await?;
         }
         for spec in schema::modem_sms_control_specs() {
@@ -1016,6 +1168,21 @@ impl MqttPublisher {
             .publish(topic.clone(), QoS::AtLeastOnce, true, Vec::<u8>::new())
             .await
             .with_context(|| format!("failed to clear retained MQTT topic `{topic}`"))
+    }
+}
+
+fn draft_text_payload(value: &str) -> &str {
+    if value.is_empty() { " " } else { value }
+}
+
+fn outgoing_sms_status_payload(last_sent: &MqttLastSentSmsState) -> String {
+    match last_sent.error() {
+        Some(error) if !error.is_empty() => format!(
+            "{} ({})",
+            last_sent.status().as_str(),
+            schema::single_line_payload(error)
+        ),
+        _ => last_sent.status().as_str().to_string(),
     }
 }
 

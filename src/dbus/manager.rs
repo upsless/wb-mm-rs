@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info};
 use zbus::{
     Connection, Proxy,
     fdo::{InterfacesAddedStream, InterfacesRemovedStream, ObjectManagerProxy},
@@ -13,9 +13,10 @@ use zbus::{
 use super::connection::emit_event;
 use super::logstrings;
 use super::modem::ModemWatcher;
-use super::sms::{delete_sms, query_sms_snapshot};
+use super::sms::{delete_sms, query_sms_snapshot, send_sms};
 use crate::dbus::schema;
-use crate::domain::{DbusCommand, DbusEvent};
+use crate::domain::{DbusCommand, DbusEvent, OutgoingSmsInfo, OutgoingSmsStatus};
+use time::OffsetDateTime;
 
 #[derive(Default)]
 struct ManagerState {
@@ -93,8 +94,8 @@ pub(super) enum ManagerLoopEvent {
     OwnerStreamClosed,
     ActiveStreamClosed(schema::DbusSignalSpec),
     VersionChanged(String),
-    ModemAdded(Option<schema::ModemId>),
-    ModemRemoved(Option<schema::ModemId>),
+    ModemAdded(schema::ModemId),
+    ModemRemoved(schema::ModemId),
     Command(DbusCommand),
 }
 
@@ -197,19 +198,18 @@ impl ManagerWatcher {
         &mut self,
         connection: &Connection,
         event_tx: &mpsc::Sender<DbusEvent>,
-        added_modem: Option<schema::ModemId>,
+        modem_id: schema::ModemId,
     ) -> Result<()> {
-        if let Some(modem_id) = added_modem {
-            if let Some(modems) = self.state.modems.as_mut()
-                && !modems.contains_key(&modem_id)
-            {
-                modems.insert(
-                    modem_id.clone(),
-                    ModemWatcher::new(modem_id, connection.clone(), event_tx.clone()),
-                );
-            }
-            self.sync_modem_count(event_tx).await?;
+        if let Some(modems) = self.state.modems.as_mut()
+            && !modems.contains_key(&modem_id)
+        {
+            modems.insert(
+                modem_id.clone(),
+                ModemWatcher::new(modem_id, connection.clone(), event_tx.clone()),
+            );
         }
+
+        self.sync_modem_count(event_tx).await?;
 
         Ok(())
     }
@@ -217,14 +217,12 @@ impl ManagerWatcher {
     pub(super) async fn handle_modem_removed(
         &mut self,
         event_tx: &mpsc::Sender<DbusEvent>,
-        removed_modem: Option<schema::ModemId>,
+        modem_id: schema::ModemId,
     ) -> Result<()> {
-        if let Some(modem_id) = removed_modem {
-            self.state.remove_modem(&modem_id);
-            info!(target: logstrings::LOG_TARGET, "{}", logstrings::modem_deleted_message(&modem_id));
-            emit_event(event_tx, DbusEvent::ModemDeleted { modem_id }).await;
-            self.sync_modem_count(event_tx).await?;
-        }
+        self.state.remove_modem(&modem_id);
+        info!(target: logstrings::LOG_TARGET, "{}", logstrings::modem_deleted_message(&modem_id));
+        emit_event(event_tx, DbusEvent::ModemDeleted { modem_id }).await;
+        self.sync_modem_count(event_tx).await?;
 
         Ok(())
     }
@@ -258,6 +256,84 @@ impl ManagerWatcher {
             }
             DbusCommand::DeleteSms { modem_id, sms_id } => {
                 delete_sms(connection, &modem_id, &sms_id).await?;
+            }
+            DbusCommand::SendSms {
+                modem_id,
+                recipient,
+                text,
+            } => {
+                let sending_info = OutgoingSmsInfo {
+                    recipient: recipient.clone(),
+                    text: text.clone(),
+                    timestamp: None,
+                    status: OutgoingSmsStatus::Sending,
+                    error: None,
+                };
+                info!(
+                    target: logstrings::LOG_TARGET,
+                    "{}",
+                    logstrings::outgoing_sms_update_message(&modem_id, &sending_info)
+                );
+                emit_event(
+                    event_tx,
+                    DbusEvent::OutgoingSmsUpdated {
+                        modem_id: modem_id.clone(),
+                        info: sending_info,
+                    },
+                )
+                .await;
+
+                match send_sms(connection, &modem_id, &recipient, &text).await {
+                    Ok(()) => {
+                        let sent_info = OutgoingSmsInfo {
+                            recipient,
+                            text,
+                            timestamp: Some(OffsetDateTime::now_utc()),
+                            status: OutgoingSmsStatus::Sent,
+                            error: None,
+                        };
+                        info!(
+                            target: logstrings::LOG_TARGET,
+                            "{}",
+                            logstrings::outgoing_sms_update_message(&modem_id, &sent_info)
+                        );
+                        emit_event(
+                            event_tx,
+                            DbusEvent::OutgoingSmsUpdated {
+                                modem_id,
+                                info: sent_info,
+                            },
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let failed_info = OutgoingSmsInfo {
+                            recipient,
+                            text,
+                            timestamp: None,
+                            status: OutgoingSmsStatus::Failed,
+                            error: Some(outgoing_sms_error_text(&err)),
+                        };
+                        info!(
+                            target: logstrings::LOG_TARGET,
+                            "{}",
+                            logstrings::outgoing_sms_update_message(&modem_id, &failed_info)
+                        );
+                        emit_event(
+                            event_tx,
+                            DbusEvent::OutgoingSmsUpdated {
+                                modem_id: modem_id.clone(),
+                                info: failed_info,
+                            },
+                        )
+                        .await;
+                        debug!(
+                            target: logstrings::LOG_TARGET,
+                            "Failed to send SMS through modem {}: {err:#}",
+                            modem_id.0
+                        );
+                    }
+                }
             }
         }
 
@@ -297,6 +373,19 @@ impl ManagerWatcher {
 
         Ok(())
     }
+}
+
+fn outgoing_sms_error_text(err: &anyhow::Error) -> String {
+    let message = err
+        .chain()
+        .last()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| err.to_string());
+
+    message
+        .rsplit_once(": ")
+        .map(|(_, reason)| reason.to_string())
+        .unwrap_or(message)
 }
 
 /// Counts objects that implement the ModemManager Modem interface.

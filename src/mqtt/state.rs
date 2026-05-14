@@ -1,8 +1,12 @@
-use crate::dbus::{SmsId, SmsSnapshot};
+use crate::dbus::{OutgoingSmsInfo, OutgoingSmsStatus, SmsId, SmsSnapshot};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use time::OffsetDateTime;
 
 use crate::dbus::ModemId;
+
+pub(super) const OUTGOING_SMS_RECIPIENT_DIGIT_COUNT: usize = 10;
+pub(super) const OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES: [&str; 2] = ["8", "+7"];
 
 #[derive(Debug, Default)]
 pub(super) struct MqttSessionState {
@@ -15,7 +19,25 @@ pub(super) struct MqttSessionState {
 pub(super) struct MqttModemState {
     pub(super) index: u32,
     is_active: bool,
+    pub(super) outgoing_sms_state: MqttOutgoingSmsState,
     pub(super) sms_state: Option<MqttModemSmsState>,
+}
+
+#[derive(Debug)]
+pub(super) struct MqttOutgoingSmsState {
+    recipient: String,
+    text: String,
+    check_phone_format: bool,
+    last_sent: Option<MqttLastSentSmsState>,
+}
+
+#[derive(Debug)]
+pub(super) struct MqttLastSentSmsState {
+    recipient: String,
+    text: String,
+    timestamp: Option<OffsetDateTime>,
+    status: OutgoingSmsStatus,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -31,6 +53,17 @@ impl Default for MqttModemSmsState {
             sms_order: Vec::new(),
             picked_sms_index: 1,
             last_published_sms_id: None,
+        }
+    }
+}
+
+impl Default for MqttOutgoingSmsState {
+    fn default() -> Self {
+        Self {
+            recipient: String::new(),
+            text: String::new(),
+            check_phone_format: true,
+            last_sent: None,
         }
     }
 }
@@ -51,6 +84,7 @@ impl MqttSessionState {
             MqttModemState {
                 index: candidate,
                 is_active: false,
+                outgoing_sms_state: MqttOutgoingSmsState::default(),
                 sms_state: None,
             },
         );
@@ -175,6 +209,87 @@ impl MqttModemSmsState {
 
     pub(super) fn delete_message(&self) -> Option<SmsId> {
         self.last_published_sms_id.clone()
+    }
+}
+
+impl MqttOutgoingSmsState {
+    pub(super) fn recipient(&self) -> &str {
+        &self.recipient
+    }
+
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) fn check_phone_format(&self) -> bool {
+        self.check_phone_format
+    }
+
+    pub(super) fn set_recipient(&mut self, recipient: String) {
+        self.recipient = recipient;
+    }
+
+    pub(super) fn set_text(&mut self, text: String) {
+        self.text = text;
+    }
+
+    pub(super) fn set_check_phone_format(&mut self, check_phone_format: bool) {
+        self.check_phone_format = check_phone_format;
+    }
+
+    pub(super) fn is_ready_to_send(&self) -> bool {
+        if self.recipient.is_empty() || self.text.trim().is_empty() {
+            return false;
+        }
+
+        if !self.check_phone_format {
+            return true;
+        }
+
+        OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES
+            .iter()
+            .find_map(|prefix| {
+                self.recipient
+                    .strip_prefix(prefix)
+                    .map(|suffix| suffix.chars().filter(|ch| ch.is_ascii_digit()).count())
+            })
+            == Some(OUTGOING_SMS_RECIPIENT_DIGIT_COUNT)
+    }
+
+    pub(super) fn last_sent(&self) -> Option<&MqttLastSentSmsState> {
+        self.last_sent.as_ref()
+    }
+
+    pub(super) fn apply_last_sent(&mut self, info: OutgoingSmsInfo) {
+        self.last_sent = Some(MqttLastSentSmsState {
+            recipient: info.recipient,
+            text: info.text,
+            timestamp: info.timestamp,
+            status: info.status,
+            error: info.error,
+        });
+    }
+}
+
+impl MqttLastSentSmsState {
+    pub(super) fn recipient(&self) -> &str {
+        &self.recipient
+    }
+
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(super) fn timestamp(&self) -> Option<OffsetDateTime> {
+        self.timestamp
+    }
+
+    pub(super) fn status(&self) -> OutgoingSmsStatus {
+        self.status
+    }
+
+    pub(super) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 }
 

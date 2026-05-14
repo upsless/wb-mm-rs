@@ -16,6 +16,15 @@ pub const MODEM_CONTROL_PRIMARY_SIM_SLOT: &str = "primary_sim_slot";
 pub const MODEM_CONTROL_OPERATOR_NAME: &str = "operator_name";
 pub const MODEM_CONTROL_OWN_NUMBERS: &str = "own_numbers";
 pub const MODEM_CONTROL_SIGNAL_QUALITY: &str = "signal_quality";
+pub const MODEM_CONTROL_LAST_SENT_SMS_RECIPIENT: &str = "last_sent_sms_recipient";
+pub const MODEM_CONTROL_LAST_SENT_SMS_TEXT: &str = "last_sent_sms_text";
+pub const MODEM_CONTROL_LAST_SENT_SMS_STATUS: &str = "last_sent_sms_status";
+pub const MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP: &str = "last_sent_sms_timestamp";
+pub const MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP_UNIXTIME: &str = "last_sent_sms_timestamp_unixtime";
+pub const MODEM_CONTROL_OUTGOING_SMS_RECIPIENT: &str = "outgoing_sms_recipient";
+pub const MODEM_CONTROL_OUTGOING_SMS_TEXT: &str = "outgoing_sms_text";
+pub const MODEM_CONTROL_CHECK_PHONE_FORMAT: &str = "check_phone_format";
+pub const MODEM_CONTROL_SEND_SMS: &str = "send_sms";
 pub const MODEM_CONTROL_DISPLAYED_SMS_INDEX: &str = "displayed_sms_index";
 pub const MODEM_CONTROL_SMS_COUNT: &str = "sms_count";
 pub const MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID: &str = "last_received_sms_dbus_id";
@@ -205,12 +214,123 @@ const MODEM_BASE_CONTROL_SPECS: [ControlSpec; 8] = [
     },
 ];
 
+const MODEM_OUTGOING_SMS_CONTROL_SPECS: [ControlSpec; 9] = [
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SENT_SMS_STATUS,
+        title_en: "Sent SMS status",
+        title_ru: "Статус отправки СМС",
+        order: 18,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP,
+        title_en: "Sent SMS date",
+        title_ru: "Дата отправки СМС",
+        order: 19,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SENT_SMS_TIMESTAMP_UNIXTIME,
+        title_en: "Sent SMS date unix time",
+        title_ru: "Дата отправки СМС unix time",
+        order: 20,
+        control_type: "unixtime",
+        readonly: true,
+        hidden: true,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SENT_SMS_RECIPIENT,
+        title_en: "Sent SMS recipient",
+        title_ru: "Получатель СМС",
+        order: 21,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_LAST_SENT_SMS_TEXT,
+        title_en: "Sent SMS text",
+        title_ru: "Текст отправл. СМС",
+        order: 22,
+        control_type: "text",
+        readonly: true,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
+        title_en: "Recipient phone #",
+        title_ru: "Номер получателя",
+        order: 23,
+        control_type: "text",
+        readonly: false,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_OUTGOING_SMS_TEXT,
+        title_en: "Outgoing SMS text",
+        title_ru: "Текст исходящей СМС",
+        order: 24,
+        control_type: "text",
+        readonly: false,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_CHECK_PHONE_FORMAT,
+        title_en: "Check phone format",
+        title_ru: "Проверять формат номера",
+        order: 25,
+        control_type: "switch",
+        readonly: false,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+    ControlSpec {
+        name: MODEM_CONTROL_SEND_SMS,
+        title_en: "Send SMS",
+        title_ru: "Отправить СМС",
+        order: 26,
+        control_type: "pushbutton",
+        readonly: false,
+        hidden: false,
+        units: None,
+        min: None,
+        max: None,
+    },
+];
+
 const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
     ControlSpec {
         name: MODEM_CONTROL_DISPLAYED_SMS_INDEX,
         title_en: "Displayed SMS, #",
         title_ru: "Отображаемая СМС, №",
-        order: 21,
+        order: 32,
         control_type: "value",
         readonly: true,
         hidden: false,
@@ -221,8 +341,8 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
     ControlSpec {
         name: MODEM_CONTROL_LAST_RECEIVED_SMS_DBUS_ID,
         title_en: "Last incoming SMS DBus#",
-        title_ru: "Последняя вх.СМС, DBus#",
-        order: 18,
+        title_ru: "Последняя входящая СМС, DBus#",
+        order: 27,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -234,7 +354,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SMS_COUNT,
         title_en: "Incoming SMS",
         title_ru: "Всего входящих СМС",
-        order: 19,
+        order: 28,
         control_type: "value",
         readonly: true,
         hidden: false,
@@ -246,7 +366,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_MESSAGE_SELECT,
         title_en: "Incoming SMS pick:",
         title_ru: "Выбор входящей СМС:",
-        order: 20,
+        order: 29,
         control_type: "range",
         readonly: true,
         hidden: false,
@@ -258,7 +378,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_DBUS_ID,
         title_en: "SMS DBus#",
         title_ru: "СМС DBus#",
-        order: 25,
+        order: 34,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -270,7 +390,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_TIMESTAMP,
         title_en: "SMS timestamp",
         title_ru: "Дата получения СМС",
-        order: 22,
+        order: 30,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -282,7 +402,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_TIMESTAMP_UNIXTIME,
         title_en: "SMS timestamp unix time",
         title_ru: "Дата получения СМС unix time",
-        order: 23,
+        order: 31,
         control_type: "unixtime",
         readonly: true,
         hidden: true,
@@ -294,7 +414,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_SENDER,
         title_en: "SMS sender",
         title_ru: "Отправитель СМС",
-        order: 24,
+        order: 33,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -306,7 +426,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_TEXT,
         title_en: "SMS text",
         title_ru: "Текст СМС",
-        order: 28,
+        order: 37,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -318,7 +438,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_IS_RECEIVED,
         title_en: "SMS received fully",
         title_ru: "СМС получена полностью",
-        order: 27,
+        order: 36,
         control_type: "switch",
         readonly: true,
         hidden: false,
@@ -330,7 +450,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_SELECTED_SMS_STORAGE,
         title_en: "SMS storage",
         title_ru: "Хранилище СМС",
-        order: 26,
+        order: 35,
         control_type: "text",
         readonly: true,
         hidden: false,
@@ -342,7 +462,7 @@ const MODEM_SMS_CONTROL_SPECS: [ControlSpec; 12] = [
         name: MODEM_CONTROL_DELETE_MESSAGE,
         title_en: "Delete current SMS",
         title_ru: "Удалить текущую СМС",
-        order: 29,
+        order: 38,
         control_type: "pushbutton",
         readonly: false,
         hidden: false,
@@ -358,6 +478,10 @@ pub fn manager_control_specs() -> &'static [ControlSpec] {
 
 pub fn modem_base_control_specs() -> &'static [ControlSpec] {
     &MODEM_BASE_CONTROL_SPECS
+}
+
+pub fn modem_outgoing_sms_control_specs() -> &'static [ControlSpec] {
+    &MODEM_OUTGOING_SMS_CONTROL_SPECS
 }
 
 pub fn modem_sms_control_specs() -> &'static [ControlSpec] {
@@ -382,6 +506,15 @@ pub fn dynamic_delete_message_spec(readonly: bool) -> ControlSpec {
         .iter()
         .find(|spec| spec.name == MODEM_CONTROL_DELETE_MESSAGE)
         .expect("delete_message control spec exists");
+
+    ControlSpec { readonly, ..*base }
+}
+
+pub fn dynamic_outgoing_sms_spec(control_name: &'static str, readonly: bool) -> ControlSpec {
+    let base = MODEM_OUTGOING_SMS_CONTROL_SPECS
+        .iter()
+        .find(|spec| spec.name == control_name)
+        .expect("outgoing SMS control spec exists");
 
     ControlSpec { readonly, ..*base }
 }
@@ -491,6 +624,16 @@ pub fn control_meta_leaf_payloads(spec: &ControlSpec) -> Vec<(&'static str, Stri
 
 pub fn string_array_payload(values: &[String]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub fn single_line_payload(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' | '\t' => ' ',
+            _ => ch,
+        })
+        .collect::<String>()
 }
 
 pub fn device_meta_topic(device_name: &str) -> String {

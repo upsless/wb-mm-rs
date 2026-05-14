@@ -1,4 +1,7 @@
-use super::{MqttModemSmsState, MqttSessionState};
+use super::{
+    MqttModemSmsState, MqttOutgoingSmsState, MqttSessionState,
+    OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES, OUTGOING_SMS_RECIPIENT_DIGIT_COUNT,
+};
 use crate::dbus::{ModemId, SmsId, SmsSnapshot};
 use time::OffsetDateTime;
 
@@ -252,8 +255,70 @@ fn accepts_snapshot_only_for_current_picked_index() {
 
     assert_eq!(state.apply_snapshot(&sms_snapshot("144")), None);
     assert_eq!(state.apply_snapshot(&sms_snapshot("145")), Some(2));
-    assert_eq!(state.last_published_sms_id(), Some(&SmsId("145".to_string())));
+    assert_eq!(
+        state.last_published_sms_id(),
+        Some(&SmsId("145".to_string()))
+    );
     assert_eq!(state.delete_message(), Some(SmsId("145".to_string())));
+}
+
+#[test]
+fn outgoing_sms_format_check_enabled_by_default() {
+    let state = MqttOutgoingSmsState::default();
+
+    assert!(state.check_phone_format());
+}
+
+#[test]
+fn outgoing_sms_ready_to_send_accepts_eleven_digit_russian_number_with_8_prefix() {
+    let mut state = MqttOutgoingSmsState::default();
+    state.set_recipient("89858619773".to_string());
+    state.set_text("hi".to_string());
+
+    assert!(state.is_ready_to_send());
+}
+
+#[test]
+fn outgoing_sms_ready_to_send_accepts_eleven_digit_russian_number_with_plus7_prefix() {
+    let mut state = MqttOutgoingSmsState::default();
+    state.set_recipient("+79858619773".to_string());
+    state.set_text("hi".to_string());
+
+    assert!(state.is_ready_to_send());
+}
+
+#[test]
+fn outgoing_sms_ready_to_send_rejects_wrong_digit_count_when_format_check_enabled() {
+    let mut state = MqttOutgoingSmsState::default();
+    state.set_recipient("8985861977".to_string());
+    state.set_text("hi".to_string());
+
+    assert!(!state.is_ready_to_send());
+}
+
+#[test]
+fn outgoing_sms_ready_to_send_rejects_wrong_prefix_when_format_check_enabled() {
+    let mut state = MqttOutgoingSmsState::default();
+    state.set_recipient("+19858619773".to_string());
+    state.set_text("hi".to_string());
+
+    assert!(!state.is_ready_to_send());
+}
+
+#[test]
+fn outgoing_sms_ready_to_send_allows_any_nonempty_number_when_format_check_disabled() {
+    let mut state = MqttOutgoingSmsState::default();
+    state.set_check_phone_format(false);
+    state.set_recipient("+123".to_string());
+    state.set_text("hi".to_string());
+
+    assert!(state.is_ready_to_send());
+}
+
+#[test]
+fn outgoing_sms_format_constants_match_russian_number_rules() {
+    assert_eq!(OUTGOING_SMS_RECIPIENT_DIGIT_COUNT, 10);
+    assert_eq!(OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES, ["8", "+7"]);
 }
 
 fn sms_ids(values: &[&str]) -> Vec<SmsId> {

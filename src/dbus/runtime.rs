@@ -23,6 +23,12 @@ pub(super) struct DbusRuntime {
     pub(super) modem_manager: ManagerWatcher,
 }
 
+enum ModemSignalRead {
+    StreamClosed,
+    Unrelated,
+    Modem(schema::ModemId),
+}
+
 impl DbusRuntime {
     pub(super) async fn new(
         connection: Connection,
@@ -84,9 +90,15 @@ impl DbusRuntime {
             // ObjectManager tree for the exact current count.
             added_modem = async {
                 let Some(interfaces_added) = self.modem_manager.streams.interfaces_added.as_mut() else {
-                    return Ok::<Option<Option<schema::ModemId>>, anyhow::Error>(None);
+                    return Ok::<Option<schema::ModemId>, anyhow::Error>(None);
                 };
-                read_added_modem(interfaces_added).await
+                loop {
+                    match read_added_modem(interfaces_added).await? {
+                        ModemSignalRead::Modem(modem_id) => return Ok(Some(modem_id)),
+                        ModemSignalRead::Unrelated => continue,
+                        ModemSignalRead::StreamClosed => return Ok(None),
+                    }
+                }
             }, if self.modem_manager.streams.interfaces_added.is_some() => {
                 match added_modem? {
                     Some(added_modem) => Ok(ManagerLoopEvent::ModemAdded(added_modem)),
@@ -95,9 +107,15 @@ impl DbusRuntime {
             }
             removed_modem = async {
                 let Some(interfaces_removed) = self.modem_manager.streams.interfaces_removed.as_mut() else {
-                    return Ok::<Option<Option<schema::ModemId>>, anyhow::Error>(None);
+                    return Ok::<Option<schema::ModemId>, anyhow::Error>(None);
                 };
-                read_removed_modem(interfaces_removed).await
+                loop {
+                    match read_removed_modem(interfaces_removed).await? {
+                        ModemSignalRead::Modem(modem_id) => return Ok(Some(modem_id)),
+                        ModemSignalRead::Unrelated => continue,
+                        ModemSignalRead::StreamClosed => return Ok(None),
+                    }
+                }
             }, if self.modem_manager.streams.interfaces_removed.is_some() => {
                 match removed_modem? {
                     Some(removed_modem) => Ok(ManagerLoopEvent::ModemRemoved(removed_modem)),
@@ -194,11 +212,9 @@ async fn read_version_change(
     Ok(Some(version))
 }
 
-async fn read_added_modem(
-    interfaces_added: &mut InterfacesAddedStream,
-) -> Result<Option<Option<schema::ModemId>>> {
+async fn read_added_modem(interfaces_added: &mut InterfacesAddedStream) -> Result<ModemSignalRead> {
     let Some(signal) = interfaces_added.next().await else {
-        return Ok(None);
+        return Ok(ModemSignalRead::StreamClosed);
     };
     let args = signal
         .args()
@@ -208,18 +224,18 @@ async fn read_added_modem(
         .keys()
         .any(|name| name.as_str() == schema::MM_MODEM_INTERFACE);
     if !touches_modem {
-        return Ok(Some(None));
+        return Ok(ModemSignalRead::Unrelated);
     }
-    Ok(Some(schema::modem_id_from_path(
-        args.object_path().as_str(),
-    )))
+    Ok(schema::modem_id_from_path(args.object_path().as_str())
+        .map(ModemSignalRead::Modem)
+        .unwrap_or(ModemSignalRead::Unrelated))
 }
 
 async fn read_removed_modem(
     interfaces_removed: &mut InterfacesRemovedStream,
-) -> Result<Option<Option<schema::ModemId>>> {
+) -> Result<ModemSignalRead> {
     let Some(signal) = interfaces_removed.next().await else {
-        return Ok(None);
+        return Ok(ModemSignalRead::StreamClosed);
     };
     let args = signal
         .args()
@@ -229,11 +245,11 @@ async fn read_removed_modem(
         .iter()
         .any(|name| name.as_str() == schema::MM_MODEM_INTERFACE);
     if !touches_modem {
-        return Ok(Some(None));
+        return Ok(ModemSignalRead::Unrelated);
     }
-    Ok(Some(schema::modem_id_from_path(
-        args.object_path().as_str(),
-    )))
+    Ok(schema::modem_id_from_path(args.object_path().as_str())
+        .map(ModemSignalRead::Modem)
+        .unwrap_or(ModemSignalRead::Unrelated))
 }
 
 /// Reads the ModemManager well-known name and activation metadata and returns

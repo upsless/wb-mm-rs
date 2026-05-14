@@ -5,10 +5,13 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::dbus::{ManagerUpdate, ModemId, ModemInfo, ModemUpdate, SmsId, SmsSnapshot, SmsUpdate};
+use crate::common::MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY;
+use crate::dbus::{
+    ManagerUpdate, ModemId, ModemInfo, ModemUpdate, OutgoingSmsInfo, SmsId, SmsSnapshot, SmsUpdate,
+};
 use crate::domain::{DbusCommand, DbusEvent, SmsInventoryEntry};
 use crate::mqtt::logstrings;
-use crate::mqtt::r#loop::{MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY, eventloop_result};
+use crate::mqtt::r#loop::eventloop_result;
 use crate::mqtt::publish::{MqttPublisher, UnavailableModemPublishState};
 use crate::mqtt::schema;
 use crate::mqtt::state::{MqttModemSmsState, MqttSessionState, max_message_select_index};
@@ -84,6 +87,9 @@ impl MqttFrontend {
                 self.apply_sms_deleted(modem_id, sms_id, dbus_command_tx)
                     .await?;
             }
+            DbusEvent::OutgoingSmsUpdated { modem_id, info } => {
+                self.handle_outgoing_sms_update(modem_id, info).await?;
+            }
             DbusEvent::ModemDeleted { modem_id } => {
                 self.handle_modem_deleted(modem_id).await?;
             }
@@ -97,6 +103,107 @@ impl MqttFrontend {
         publish: Publish,
         dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
+        if let Some(modem_index) = parse_outgoing_sms_recipient_topic(&publish.topic) {
+            let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
+                return Ok(());
+            };
+
+            let Ok(payload) = std::str::from_utf8(&publish.payload) else {
+                debug!(
+                    target: logstrings::LOG_TARGET,
+                    "Ignoring non-UTF8 outgoing_sms_recipient payload in topic `{}`",
+                    publish.topic
+                );
+                return Ok(());
+            };
+
+            if let Some(modem) = self.state.modems.get_mut(&modem_id) {
+                let trimmed = payload.trim();
+                let mut chars = trimmed.chars();
+                let has_leading_plus = matches!(chars.next(), Some('+'));
+                let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                let sanitized = if has_leading_plus {
+                    format!("+{digits}")
+                } else {
+                    digits
+                };
+
+                modem.outgoing_sms_state.set_recipient(sanitized);
+            }
+            self.sync_modem_outgoing_sms_state(&modem_id).await?;
+            return Ok(());
+        }
+
+        if let Some(modem_index) = parse_outgoing_sms_text_topic(&publish.topic) {
+            let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
+                return Ok(());
+            };
+
+            let Ok(payload) = std::str::from_utf8(&publish.payload) else {
+                debug!(
+                    target: logstrings::LOG_TARGET,
+                    "Ignoring non-UTF8 outgoing_sms_text payload in topic `{}`",
+                    publish.topic
+                );
+                return Ok(());
+            };
+
+            if let Some(modem) = self.state.modems.get_mut(&modem_id) {
+                modem.outgoing_sms_state.set_text(payload.to_string());
+            }
+            self.sync_modem_outgoing_sms_state(&modem_id).await?;
+            return Ok(());
+        }
+
+        if let Some(modem_index) = parse_check_phone_format_topic(&publish.topic) {
+            let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
+                return Ok(());
+            };
+
+            let Ok(payload) = std::str::from_utf8(&publish.payload) else {
+                debug!(
+                    target: logstrings::LOG_TARGET,
+                    "Ignoring non-UTF8 check_phone_format payload in topic `{}`",
+                    publish.topic
+                );
+                return Ok(());
+            };
+
+            let payload = payload.trim();
+            let Some(check_phone_format) = (match payload {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            }) else {
+                debug!(
+                    target: logstrings::LOG_TARGET,
+                    "Ignoring invalid check_phone_format payload `{payload}` in topic `{}`",
+                    publish.topic
+                );
+                return Ok(());
+            };
+
+            if let Some(modem) = self.state.modems.get_mut(&modem_id) {
+                modem
+                    .outgoing_sms_state
+                    .set_check_phone_format(check_phone_format);
+            }
+            self.sync_modem_outgoing_sms_state(&modem_id).await?;
+            return Ok(());
+        }
+
+        if let Some(modem_index) = parse_send_sms_topic(&publish.topic) {
+            let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
+                return Ok(());
+            };
+            if !self.accepts_modem_user_write(&modem_id, schema::MODEM_CONTROL_SEND_SMS) {
+                return Ok(());
+            }
+
+            self.send_outgoing_sms(modem_id, dbus_command_tx).await?;
+            return Ok(());
+        }
+
         if let Some(modem_index) = parse_message_select_topic(&publish.topic) {
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
                 return Ok(());
@@ -172,6 +279,12 @@ impl MqttFrontend {
         self.publisher
             .publish_manager_found(&version, modem_count)
             .await?;
+
+        let modem_ids = self.state.modems.keys().cloned().collect::<Vec<_>>();
+        for modem_id in modem_ids {
+            self.sync_modem_outgoing_sms_state(&modem_id).await?;
+        }
+
         Ok(())
     }
 
@@ -182,7 +295,12 @@ impl MqttFrontend {
                 let manager_available = schema::modemmanager_is_available(status);
                 self.state.manager_available = manager_available;
                 self.publisher.publish_manager_status(Some(status)).await?;
-                if !manager_available {
+                if manager_available {
+                    let modem_ids = self.state.modems.keys().cloned().collect::<Vec<_>>();
+                    for modem_id in modem_ids {
+                        self.sync_modem_outgoing_sms_state(&modem_id).await?;
+                    }
+                } else {
                     self.publish_modems_unavailable().await?;
                 }
             }
@@ -219,6 +337,7 @@ impl MqttFrontend {
         self.publisher
             .publish_modem_found(&modem_id, modem_index, &info)
             .await?;
+        self.sync_modem_outgoing_sms_state(&modem_id).await?;
 
         Ok(())
     }
@@ -232,7 +351,8 @@ impl MqttFrontend {
         }
         self.publisher
             .publish_modem_update(&modem_id, modem_index, &update)
-            .await
+            .await?;
+        self.sync_modem_outgoing_sms_state(&modem_id).await
     }
 
     async fn handle_modem_deleted(&mut self, modem_id: ModemId) -> Result<()> {
@@ -363,6 +483,18 @@ impl MqttFrontend {
             .await
     }
 
+    async fn handle_outgoing_sms_update(
+        &mut self,
+        modem_id: ModemId,
+        info: OutgoingSmsInfo,
+    ) -> Result<()> {
+        if let Some(modem) = self.state.modems.get_mut(&modem_id) {
+            modem.outgoing_sms_state.apply_last_sent(info);
+        }
+
+        self.sync_modem_outgoing_sms_state(&modem_id).await
+    }
+
     async fn apply_sms_deleted(
         &mut self,
         modem_id: ModemId,
@@ -424,6 +556,49 @@ impl MqttFrontend {
         Ok(())
     }
 
+    async fn send_outgoing_sms(
+        &mut self,
+        modem_id: ModemId,
+        dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
+    ) -> Result<()> {
+        let Some((can_send, recipient, text)) = self.state.modems.get(&modem_id).map(|modem| {
+            (
+                modem.outgoing_sms_state.is_ready_to_send(),
+                modem.outgoing_sms_state.recipient().to_string(),
+                modem.outgoing_sms_state.text().to_string(),
+            )
+        }) else {
+            return Ok(());
+        };
+
+        if !can_send {
+            debug!(
+                target: logstrings::LOG_TARGET,
+                "Ignoring send_sms for modem {} while outgoing SMS is not ready",
+                modem_id.0
+            );
+            return Ok(());
+        }
+
+        send_dbus_command(
+            dbus_command_tx,
+            DbusCommand::SendSms {
+                modem_id: modem_id.clone(),
+                recipient,
+                text,
+            },
+        )
+        .await;
+
+        if let Some(modem) = self.state.modems.get_mut(&modem_id) {
+            modem.outgoing_sms_state.set_recipient(String::new());
+            modem.outgoing_sms_state.set_text(String::new());
+        }
+        self.sync_modem_outgoing_sms_state(&modem_id).await?;
+
+        Ok(())
+    }
+
     async fn finish_synced_sms_change(
         &mut self,
         modem_id: ModemId,
@@ -457,7 +632,7 @@ impl MqttFrontend {
         Ok(())
     }
 
-    async fn publish_modems_unavailable(&self) -> Result<()> {
+    async fn publish_modems_unavailable(&mut self) -> Result<()> {
         let modems = self
             .state
             .modems
@@ -478,7 +653,20 @@ impl MqttFrontend {
             })
             .collect::<Vec<_>>();
 
-        self.publisher.publish_modems_unavailable(modems).await
+        self.publisher.publish_modems_unavailable(modems).await?;
+
+        for (modem_id, modem) in &self.state.modems {
+            self.publisher
+                .sync_modem_outgoing_sms_state(
+                    modem_id,
+                    modem.index,
+                    &modem.outgoing_sms_state,
+                    false,
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn sync_modem_sms_state(&mut self, modem_id: &ModemId) -> Result<()> {
@@ -491,6 +679,22 @@ impl MqttFrontend {
 
         self.publisher
             .sync_modem_sms_state(modem_id, modem.index, modem_sms)
+            .await
+    }
+
+    async fn sync_modem_outgoing_sms_state(&mut self, modem_id: &ModemId) -> Result<()> {
+        let Some(modem) = self.state.modems.get(modem_id) else {
+            return Ok(());
+        };
+
+        let writable = self.state.manager_available && self.state.modem_is_active(modem_id);
+        self.publisher
+            .sync_modem_outgoing_sms_state(
+                modem_id,
+                modem.index,
+                &modem.outgoing_sms_state,
+                writable,
+            )
             .await
     }
 
@@ -523,6 +727,22 @@ impl MqttFrontend {
 
 fn parse_message_select_topic(topic: &str) -> Option<u32> {
     parse_modem_control_on_topic(topic, schema::MODEM_CONTROL_MESSAGE_SELECT)
+}
+
+fn parse_outgoing_sms_recipient_topic(topic: &str) -> Option<u32> {
+    parse_modem_control_on_topic(topic, schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT)
+}
+
+fn parse_outgoing_sms_text_topic(topic: &str) -> Option<u32> {
+    parse_modem_control_on_topic(topic, schema::MODEM_CONTROL_OUTGOING_SMS_TEXT)
+}
+
+fn parse_check_phone_format_topic(topic: &str) -> Option<u32> {
+    parse_modem_control_on_topic(topic, schema::MODEM_CONTROL_CHECK_PHONE_FORMAT)
+}
+
+fn parse_send_sms_topic(topic: &str) -> Option<u32> {
+    parse_modem_control_on_topic(topic, schema::MODEM_CONTROL_SEND_SMS)
 }
 
 fn parse_delete_picked_sms_topic(topic: &str) -> Option<u32> {
@@ -581,7 +801,9 @@ fn compare_sms_ids(left: &SmsId, right: &SmsId) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_sms_ids, parse_delete_picked_sms_topic, parse_message_select_topic, sorted_sms_ids,
+        compare_sms_ids, parse_check_phone_format_topic, parse_delete_picked_sms_topic,
+        parse_message_select_topic, parse_outgoing_sms_recipient_topic,
+        parse_outgoing_sms_text_topic, parse_send_sms_topic, sorted_sms_ids,
     };
     use crate::dbus::SmsId;
     use crate::domain::SmsInventoryEntry;
@@ -609,6 +831,58 @@ mod tests {
             parse_delete_picked_sms_topic("/devices/mm_modem_3/controls/message_select/on"),
             None
         );
+    }
+
+    #[test]
+    fn parses_outgoing_sms_topics() {
+        assert_eq!(
+            parse_outgoing_sms_recipient_topic(
+                "/devices/mm_modem_3/controls/outgoing_sms_recipient/on"
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            parse_outgoing_sms_text_topic("/devices/mm_modem_3/controls/outgoing_sms_text/on"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_send_sms_topic("/devices/mm_modem_3/controls/send_sms/on"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_check_phone_format_topic("/devices/mm_modem_3/controls/check_phone_format/on"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn recipient_input_keeps_only_leading_plus_and_digits() {
+        let raw = "+7 (985) 861-9773 доб.42";
+        let mut chars = raw.chars();
+        let has_leading_plus = matches!(chars.next(), Some('+'));
+        let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        let sanitized = if has_leading_plus {
+            format!("+{digits}")
+        } else {
+            digits
+        };
+
+        assert_eq!(sanitized, "+7985861977342");
+    }
+
+    #[test]
+    fn recipient_input_drops_non_leading_plus() {
+        let raw = "7+985+861-97-73";
+        let mut chars = raw.chars();
+        let has_leading_plus = matches!(chars.next(), Some('+'));
+        let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        let sanitized = if has_leading_plus {
+            format!("+{digits}")
+        } else {
+            digits
+        };
+
+        assert_eq!(sanitized, "79858619773");
     }
 
     #[test]

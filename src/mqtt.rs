@@ -10,7 +10,9 @@ use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS, Transport};
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
-use crate::common::wait_for_shutdown;
+use crate::common::{
+    MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
+};
 use crate::domain::{DbusCommand, DbusEvent};
 use crate::mqtt::frontend::MqttFrontend;
 use crate::mqtt::publish::switch_payload;
@@ -19,8 +21,6 @@ const DEFAULT_MQTT_ADDRESS: &str = "unix:///var/run/mosquitto/mosquitto.sock";
 const DEFAULT_MQTT_PORT: u16 = 1883;
 const MQTT_CLIENT_ID_PREFIX: &str = "wb-mm-mqtt";
 const MQTT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60);
-const MQTT_REQUEST_QUEUE_CAPACITY: usize = 16;
-const MQTT_INCOMING_CHANNEL_CAPACITY: usize = 32;
 
 pub async fn run_lifecycle(
     mqtt_address: Option<String>,

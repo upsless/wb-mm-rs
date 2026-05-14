@@ -14,15 +14,13 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
-use crate::common::wait_for_shutdown;
+use crate::common::{
+    DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
+    MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+};
 use crate::domain::DbusCommand;
 
 const LOG_TARGET: &str = "MAIN";
-
-const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
-const MQTT_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(60);
-const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
-const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
 async fn main() -> Result<()> {

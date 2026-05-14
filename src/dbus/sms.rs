@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use zbus::{
     Connection, Proxy,
     proxy::{Builder as ProxyBuilder, CacheProperties},
-    zvariant::{ObjectPath, OwnedObjectPath},
+    zvariant::{ObjectPath, OwnedObjectPath, Value},
 };
 
 use super::connection::emit_event;
@@ -222,27 +222,17 @@ impl SmsInventoryWorker {
                 continue;
             }
 
-            inventory_cache.insert(
-                sms_id.clone(),
-                SmsInventoryEntry {
-                    sms_id: sms_id.clone(),
-                    timestamp: query_sms_timestamp(&self.connection, sms_id).await?,
-                },
-            );
+            let Some(entry) = query_sms_inventory_entry(&self.connection, sms_id).await? else {
+                continue;
+            };
+            inventory_cache.insert(sms_id.clone(), entry);
         }
 
-        Ok(inventory_entries(inventory_cache, &sms_ids))
+        Ok(sms_ids
+            .iter()
+            .filter_map(|sms_id| inventory_cache.get(sms_id).cloned())
+            .collect())
     }
-}
-
-fn inventory_entries(
-    inventory_cache: &HashMap<schema::SmsId, SmsInventoryEntry>,
-    sms_ids: &[schema::SmsId],
-) -> Vec<SmsInventoryEntry> {
-    sms_ids
-        .iter()
-        .filter_map(|sms_id| inventory_cache.get(sms_id).cloned())
-        .collect()
 }
 
 #[derive(Default)]
@@ -614,10 +604,10 @@ pub(super) async fn query_sms_snapshot(
     }))
 }
 
-async fn query_sms_timestamp(
+async fn query_sms_inventory_entry(
     connection: &Connection,
     sms_id: &schema::SmsId,
-) -> Result<Option<OffsetDateTime>> {
+) -> Result<Option<SmsInventoryEntry>> {
     let sms_path = schema::sms_path_from_id(sms_id);
     let sms_proxy: Proxy<'_> = ProxyBuilder::new(connection)
         .destination(schema::MM_BUS_NAME)
@@ -631,12 +621,23 @@ async fn query_sms_timestamp(
         .await
         .with_context(|| format!("failed to create SMS proxy for {}", sms_id.0))?;
 
+    let pdu_type: u32 = sms_proxy
+        .get_property("PduType")
+        .await
+        .with_context(|| format!("failed to read SMS {} PduType property", sms_id.0))?;
+    if !is_incoming_sms_pdu(pdu_type) {
+        return Ok(None);
+    }
+
     let timestamp: String = sms_proxy
         .get_property("Timestamp")
         .await
         .with_context(|| format!("failed to read SMS {} Timestamp property", sms_id.0))?;
 
-    Ok(parse_sms_timestamp(&timestamp))
+    Ok(Some(SmsInventoryEntry {
+        sms_id: sms_id.clone(),
+        timestamp: parse_sms_timestamp(&timestamp),
+    }))
 }
 
 pub(super) async fn delete_sms(
@@ -669,6 +670,58 @@ pub(super) async fn delete_sms(
                 sms_id.0, modem_id.0
             )
         })?;
+
+    Ok(())
+}
+
+pub(super) async fn send_sms(
+    connection: &Connection,
+    modem_id: &schema::ModemId,
+    recipient: &str,
+    text: &str,
+) -> Result<()> {
+    let modem_path = schema::modem_path_from_id(modem_id);
+    let messaging_proxy: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(schema::MM_BUS_NAME)
+        .context("failed to set modem messaging proxy destination")?
+        .path(modem_path.as_str())
+        .context("failed to set modem messaging proxy path")?
+        .interface(schema::MM_MODEM_MESSAGING_INTERFACE)
+        .context("failed to set modem messaging proxy interface")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+        .with_context(|| format!("failed to create modem messaging proxy for {}", modem_id.0))?;
+
+    let mut properties = HashMap::new();
+    properties.insert("number", Value::from(recipient));
+    properties.insert("text", Value::from(text));
+
+    let reply = messaging_proxy
+        .call_method("Create", &(properties,))
+        .await
+        .with_context(|| format!("failed to create outgoing SMS on modem {}", modem_id.0))?;
+    let sms_path: OwnedObjectPath = reply
+        .body()
+        .deserialize()
+        .context("failed to decode created outgoing SMS object path")?;
+
+    let sms_proxy: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(schema::MM_BUS_NAME)
+        .context("failed to set outgoing SMS proxy destination")?
+        .path(sms_path.as_str())
+        .context("failed to set outgoing SMS proxy path")?
+        .interface(schema::MM_SMS_INTERFACE)
+        .context("failed to set outgoing SMS proxy interface")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+        .context("failed to create outgoing SMS proxy")?;
+
+    sms_proxy
+        .call_method("Send", &())
+        .await
+        .with_context(|| format!("failed to send SMS via modem {}", modem_id.0))?;
 
     Ok(())
 }
