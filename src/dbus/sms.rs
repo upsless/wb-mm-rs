@@ -130,11 +130,7 @@ impl SmsInventoryWorker {
         info!(
             target: logstrings::LOG_TARGET,
             "{}",
-            logstrings::sms_inventory_snapshot_message(
-                &self.modem_id,
-                entries.len(),
-                None,
-            )
+            logstrings::sms_inventory_snapshot_message(&self.modem_id, entries.len())
         );
         emit_event(
             &self.event_tx,
@@ -235,17 +231,16 @@ impl SmsInventoryWorker {
             );
         }
 
-        Ok(inventory_entries(inventory_cache, Some(&sms_ids)))
+        Ok(inventory_entries(inventory_cache, &sms_ids))
     }
 }
 
 fn inventory_entries(
     inventory_cache: &HashMap<schema::SmsId, SmsInventoryEntry>,
-    sms_ids: Option<&[schema::SmsId]>,
+    sms_ids: &[schema::SmsId],
 ) -> Vec<SmsInventoryEntry> {
     sms_ids
-        .into_iter()
-        .flatten()
+        .iter()
         .filter_map(|sms_id| inventory_cache.get(sms_id).cloned())
         .collect()
 }

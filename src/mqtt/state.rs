@@ -22,7 +22,7 @@ pub(super) struct MqttModemState {
 pub(super) struct MqttModemSmsState {
     sms_order: Vec<SmsId>,
     picked_sms_index: u32,
-    displayed_sms_id: Option<SmsId>,
+    last_published_sms_id: Option<SmsId>,
 }
 
 impl Default for MqttModemSmsState {
@@ -30,7 +30,7 @@ impl Default for MqttModemSmsState {
         Self {
             sms_order: Vec::new(),
             picked_sms_index: 1,
-            displayed_sms_id: None,
+            last_published_sms_id: None,
         }
     }
 }
@@ -157,16 +157,16 @@ impl MqttModemSmsState {
             return None;
         }
 
-        self.displayed_sms_id = Some(snapshot.sms_id.clone());
+        self.last_published_sms_id = Some(snapshot.sms_id.clone());
         Some(self.picked_sms_index)
     }
 
-    pub(super) fn displayed_sms_id(&self) -> Option<&SmsId> {
-        self.displayed_sms_id.as_ref()
+    pub(super) fn last_published_sms_id(&self) -> Option<&SmsId> {
+        self.last_published_sms_id.as_ref()
     }
 
     pub(super) fn displayed_sms_index(&self) -> Option<u32> {
-        let displayed_sms_id = self.displayed_sms_id.as_ref()?;
+        let displayed_sms_id = self.last_published_sms_id.as_ref()?;
         self.sms_order
             .iter()
             .position(|sms_id| sms_id == displayed_sms_id)
@@ -174,7 +174,7 @@ impl MqttModemSmsState {
     }
 
     pub(super) fn delete_message(&self) -> Option<SmsId> {
-        self.displayed_sms_id.clone()
+        self.last_published_sms_id.clone()
     }
 }
 

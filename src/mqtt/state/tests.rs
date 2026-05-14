@@ -47,7 +47,7 @@ fn sms_order_keeps_picked_position_when_displayed_sms_moves() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 2,
-        displayed_sms_id: Some(SmsId("145".to_string())),
+        last_published_sms_id: Some(SmsId("145".to_string())),
     };
 
     let picked_sms_id = state.apply_sms_order(sms_ids(&["146", "144", "145"]));
@@ -63,7 +63,7 @@ fn sms_order_does_not_request_when_picked_sms_id_survives() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 3,
-        displayed_sms_id: Some(SmsId("145".to_string())),
+        last_published_sms_id: Some(SmsId("145".to_string())),
     };
 
     let picked_sms_id = state.apply_sms_order(sms_ids(&["144", "146"]));
@@ -79,7 +79,7 @@ fn sms_order_requests_snapshot_when_picked_sms_id_changes() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 2,
-        displayed_sms_id: Some(SmsId("145".to_string())),
+        last_published_sms_id: Some(SmsId("145".to_string())),
     };
 
     let picked_sms_id = state.apply_sms_order(sms_ids(&["144", "146"]));
@@ -123,7 +123,7 @@ fn sms_order_clears_empty_selection() {
 fn sms_order_does_not_clear_displayed_sms() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144"]),
-        displayed_sms_id: Some(SmsId("144".to_string())),
+        last_published_sms_id: Some(SmsId("144".to_string())),
         ..Default::default()
     };
 
@@ -138,7 +138,7 @@ fn remove_sms_after_picked_index_only_reduces_count() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 1,
-        displayed_sms_id: Some(SmsId("144".to_string())),
+        last_published_sms_id: Some(SmsId("144".to_string())),
     };
 
     let request_sms_id = state.remove_sms(&SmsId("146".to_string()));
@@ -154,7 +154,7 @@ fn remove_sms_before_picked_index_shifts_pick_without_snapshot() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145", "146"]),
         picked_sms_index: 2,
-        displayed_sms_id: Some(SmsId("145".to_string())),
+        last_published_sms_id: Some(SmsId("145".to_string())),
     };
 
     let request_sms_id = state.remove_sms(&SmsId("144".to_string()));
@@ -170,7 +170,7 @@ fn remove_sms_at_picked_index_requests_replacement_snapshot() {
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144", "145"]),
         picked_sms_index: 1,
-        displayed_sms_id: Some(SmsId("144".to_string())),
+        last_published_sms_id: Some(SmsId("144".to_string())),
     };
 
     let request_sms_id = state.remove_sms(&SmsId("144".to_string()));
@@ -186,7 +186,7 @@ fn remove_last_sms_at_picked_index_keeps_displayed_id_but_has_no_valid_display()
     let mut state = MqttModemSmsState {
         sms_order: sms_ids(&["144"]),
         picked_sms_index: 1,
-        displayed_sms_id: Some(SmsId("144".to_string())),
+        last_published_sms_id: Some(SmsId("144".to_string())),
     };
 
     let request_sms_id = state.remove_sms(&SmsId("144".to_string()));
@@ -252,7 +252,7 @@ fn accepts_snapshot_only_for_current_picked_index() {
 
     assert_eq!(state.apply_snapshot(&sms_snapshot("144")), None);
     assert_eq!(state.apply_snapshot(&sms_snapshot("145")), Some(2));
-    assert_eq!(state.displayed_sms_id(), Some(&SmsId("145".to_string())));
+    assert_eq!(state.last_published_sms_id(), Some(&SmsId("145".to_string())));
     assert_eq!(state.delete_message(), Some(SmsId("145".to_string())));
 }
 

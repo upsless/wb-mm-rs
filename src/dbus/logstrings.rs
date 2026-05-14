@@ -42,18 +42,8 @@ pub fn modem_update_message(modem_id: &ModemId, update: &ModemUpdate) -> String 
     format!("Modem {} changed: {}", modem_id.0, update.summary())
 }
 
-pub fn sms_inventory_snapshot_message(
-    modem_id: &ModemId,
-    sms_count: usize,
-    initial_sms_id: Option<&SmsId>,
-) -> String {
-    format!(
-        "Modem {} SMS inventory: sms_count={sms_count}, initial_sms={}",
-        modem_id.0,
-        initial_sms_id
-            .map(|sms_id| sms_id.0.as_str())
-            .unwrap_or("None"),
-    )
+pub fn sms_inventory_snapshot_message(modem_id: &ModemId, sms_count: usize) -> String {
+    format!("Modem {} SMS inventory: sms_count={sms_count}", modem_id.0)
 }
 
 pub fn sms_property_changed_message(modem_id: &ModemId, update: &SmsUpdate) -> String {

@@ -291,7 +291,7 @@ impl MqttFrontend {
                 .modems
                 .get(&modem_id)
                 .and_then(|modem| modem.sms_state.as_ref())
-                .and_then(MqttModemSmsState::displayed_sms_id)
+                .and_then(MqttModemSmsState::last_published_sms_id)
                 != Some(picked_sms_id)
         });
         self.finish_synced_sms_change(modem_id, request_sms_id, true, dbus_command_tx)
@@ -347,7 +347,7 @@ impl MqttFrontend {
             let Some(modem_sms_state) = modem.sms_state.as_ref() else {
                 return Ok(());
             };
-            if modem_sms_state.displayed_sms_id() != Some(&update.sms_id) {
+            if modem_sms_state.last_published_sms_id() != Some(&update.sms_id) {
                 return Ok(());
             };
             Some(modem.index)
