@@ -1130,6 +1130,11 @@ impl MqttPublisher {
     }
 
     async fn cleanup_control(&self, device_name: &str, spec: &ControlSpec) -> Result<()> {
+        self.unpublish_retained(schema::control_on_topic(device_name, spec.name))
+            .await?;
+        self.unpublish_retained(schema::control_value_topic(device_name, spec.name))
+            .await?;
+
         self.unpublish_retained(schema::control_meta_topic(device_name, spec.name))
             .await?;
 
@@ -1141,11 +1146,6 @@ impl MqttPublisher {
             ))
             .await?;
         }
-
-        self.unpublish_retained(schema::control_on_topic(device_name, spec.name))
-            .await?;
-        self.unpublish_retained(schema::control_value_topic(device_name, spec.name))
-            .await?;
 
         Ok(())
     }

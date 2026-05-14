@@ -21,7 +21,8 @@ Build a focused daemon, not a general-purpose framework. The Python project is
 reference material for behavior, logs, mappings, and edge cases, but its
 architecture should not be copied.
 
-The daemon now has two long-lived async subsystems plus a shared vocabulary:
+The implemented daemon currently has two long-lived async subsystems plus a
+shared vocabulary:
 
 - DBus handler: ModemManager discovery, DBus events, and DBus method calls.
 - MQTT handler: Wiren Board device/control creation, value publishing, user
@@ -31,8 +32,12 @@ The daemon now has two long-lived async subsystems plus a shared vocabulary:
 - `src/common.rs`: only small cross-runtime helpers such as
   `wait_for_shutdown()`.
 
-MQTT is the primary lifecycle gate. If MQTT is disconnected, DBus work should be
-stopped and runtime state dropped until MQTT reconnects.
+Today MQTT is still the primary lifecycle gate. If MQTT is disconnected, DBus
+work is stopped and runtime state is dropped until MQTT reconnects.
+
+That is no longer considered the final architecture. The next major direction
+is to introduce a Core runtime that keeps DBus-side command handling alive even
+while MQTT is down.
 
 ## Standing Decisions
 
@@ -117,6 +122,69 @@ stopped and runtime state dropped until MQTT reconnects.
   the MQTT session, and MQTT sends `DbusCommand` directly to the currently
   active DBus session sender.
 
+## Planned Core-Centric Direction
+
+The next architectural step is no longer "more MQTT controls first". It is a
+lifecycle inversion:
+
+- DBus + Core must become the always-on command plane;
+- MQTT must become an optional projection/control adapter that may disconnect
+  and reconnect independently.
+
+The planned Core layer should own:
+
+- operational configuration/state loading and persistence;
+- authorization for outbound SMS/calls;
+- handling of command SMS and future DTMF commands;
+- audit logging for privileged operations.
+
+### Number Lists
+
+The old single whitelist idea is now split into two separate lists:
+
+1. `command list`
+   - numbers allowed to issue Core-level commands through SMS and later DTMF;
+   - Core may also send SMS replies and place confirmation calls to these
+     numbers;
+   - this list should not be exposed through MQTT.
+2. `send list`
+   - numbers that MQTT-driven automation is allowed to use as outbound
+     destinations;
+   - this list may be visible in MQTT so scripts can discover valid targets.
+
+The lists may overlap arbitrarily.
+
+There must be one default number in each list:
+
+- `default_command_number`
+- `default_send_number`
+
+If defaults are missing, the daemon may still start, but it should enter a
+degraded mode where:
+
+- Core command handling is disabled;
+- outbound SMS/calls are rejected before any DBus action.
+
+### Visibility and Routing Rules
+
+- Ordinary user-facing incoming SMS continue to flow into MQTT.
+- Command SMS are consumed by Core, executed if authorized, logged, replied to
+  if needed, and deleted without reaching MQTT.
+- Future command calls / DTMF sessions should follow the same rule.
+- MQTT may optionally receive only a coarse incoming-controller status for
+  command calls, not command payload/details.
+- Outbound requests initiated from MQTT must be checked against the send list
+  in Core even if the UI already disables invalid actions.
+
+### Persistence and Logging
+
+- No database is planned for the command/configuration layer.
+- TOML is the current preferred direction for both static configuration and
+  dynamic operational state.
+- Command execution, authorization failures, and list-changing operations
+  should be logged under a dedicated target such as `AUDIT` or `CORE`, with an
+  optional separate audit log file.
+
 ## Current Shared Vocabulary
 
 - `src/domain.rs` now holds the shared DBus/MQTT vocabulary and neutral domain
@@ -137,9 +205,11 @@ stopped and runtime state dropped until MQTT reconnects.
   - `SmsSnapshot { modem_id, snapshot }`
   - `SmsPropertyChanged { modem_id, update }`
   - `SmsDeleted { modem_id, sms_id }`
+  - `OutgoingSmsUpdated { modem_id, info }`
 - DBus commands:
   - `RefreshSms { modem_id, sms_id }`
   - `DeleteSms { modem_id, sms_id }`
+  - `SendSms { modem_id, recipient, text }`
 - `SmsSnapshot` events/commands no longer carry a redundant outer `sms_id`;
   `snapshot.sms_id` is authoritative.
 - DBus SMS property changes are modeled as:
@@ -167,8 +237,8 @@ MQTT runtime state lives in `src/mqtt/state.rs`.
 - `MqttModemSmsState` owns the SMS selection model:
   - `sms_order: Vec<SmsId>`;
   - `picked_sms_index: u32` as a 1-based UI position;
-  - `displayed_sms_id: Option<SmsId>` as the DBus id currently rendered in
-    selected-SMS fields.
+  - `last_published_sms_id: Option<SmsId>` as the DBus id whose snapshot was
+    last accepted and published into selected-SMS fields.
 
 Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 `state.rs`.
@@ -238,16 +308,17 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 
 - `SmsSnapshot` is accepted only when `snapshot.sms_id` equals the DBus id at
   `sms_order[picked_sms_index - 1]`.
-- Accepting a snapshot records `displayed_sms_id = snapshot.sms_id`, publishes
-  selected-SMS fields, publishes `displayed_sms_index`, and enables delete.
+- Accepting a snapshot records `last_published_sms_id = snapshot.sms_id`,
+  publishes selected-SMS fields, publishes `displayed_sms_index`, and enables
+  delete.
 - Snapshots for any other SMS id are ignored by MQTT.
 - Live `SmsUpdate` is applied to visible MQTT fields only when
-  `displayed_sms_id == update.sms_id`.
+  `last_published_sms_id == update.sms_id`.
 - User writes to `message_select/on` update `picked_sms_index`, map the index to
   `sms_order[picked_sms_index - 1]`, and request a fresh snapshot only when the
   effective clamped index changes.
-- User writes to `delete_message/on` delete `displayed_sms_id`, i.e. the SMS
-  currently visible to the user. Ordinary DBus deletion events drive MQTT
+- User writes to `delete_message/on` delete `last_published_sms_id`, i.e. the
+  SMS currently visible to the user. Ordinary DBus deletion events drive MQTT
   cleanup and reselection.
 - When a new SMS list arrives:
   - update `sms_order`;
@@ -259,11 +330,11 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
     picked id exists;
   - publish updated `message_select` and `displayed_sms_index` from state.
 - `displayed_sms_index` is now a real state-derived value: it is the current
-  1-based position of `displayed_sms_id` inside `sms_order`, or `null` if the
-  displayed SMS is no longer in the list.
-- `displayed_sms_id` is changed only by accepting a snapshot. List changes and
-  deletion handling may make it invalid for the current list, but they do not
-  clear it directly.
+  1-based position of `last_published_sms_id` inside `sms_order`, or `null` if
+  the last published SMS is no longer in the list.
+- `last_published_sms_id` is changed only by accepting a snapshot. List
+  changes and deletion handling may make it invalid for the current list, but
+  they do not clear it directly.
 
 ## Recent Refactor Notes From 2026-04-30
 
@@ -375,17 +446,32 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 
 ## Next Likely Work
 
-1. Observe the new timestamp-based inventory ordering on a live modem:
+1. Sketch the lifecycle refactor from `MQTT -> DBus` toward
+   `Core + DBus -> optional MQTT`:
+   - decide where the new Core runtime lives;
+   - decide how DBus events are routed first into Core and only then into MQTT;
+   - decide how MQTT-originated outbound actions are revalidated by Core.
+2. Define the first persistent TOML model for:
+   - `command list`;
+   - `send list`;
+   - `default_command_number`;
+   - `default_send_number`;
+   - degraded-mode semantics when defaults are absent.
+3. Add the first information-only Core surface before role-management commands:
+   - expose send-list facts to MQTT for script visibility;
+   - keep command-list facts private to Core;
+   - prepare audit logging target/file plumbing.
+4. Observe the new timestamp-based inventory ordering on a live modem:
    - verify that first selection after startup now always comes through the
      ordinary `RefreshSms` path;
    - verify that deleting an SMS and then receiving a new SMS in the reused
      numeric slot still produces correct receive-time ordering.
-2. Consider whether DBus should keep sending full inventory entry lists or move
+5. Consider whether DBus should keep sending full inventory entry lists or move
    later to incremental add/remove inventory events once behavior is stable.
-3. Revisit whether `last_received_sms_dbus_id` should remain the final user
+6. Revisit whether `last_received_sms_dbus_id` should remain the final user
    visible control, or whether it should later be complemented by a visible
    "Last Received SMS Date" plus hidden unix-time control.
-4. Validate and polish the new modem-level outgoing SMS flow on real hardware:
+7. Validate and polish the new modem-level outgoing SMS flow on real hardware:
    - per modem, writable compose controls now exist for recipient and text plus
      a `send_sms` trigger button;
    - readonly result controls now show `last_sent_sms_status`,
@@ -396,23 +482,23 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
    - confirm that the ModemManager `Create` + `Send` path behaves correctly on
      the target modem and that `sending -> sent/failed` is sufficient for the
      first release.
-5. After outgoing SMS, move on to incoming call signaling/handling.
-6. Figure out how to persist the SMS storage choice that worked manually:
+8. After outgoing SMS, move on to incoming call signaling/handling.
+9. Figure out how to persist the SMS storage choice that worked manually:
    `AT+CPMS="ME","ME","ME"` caused the modem to rediscover today's SMS after a
    reboot-like transition, but the daemon should not rely on manual console
    state.
-7. Continue reducing MQTT SMS handler complexity:
+10. Continue reducing MQTT SMS handler complexity:
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-8. Re-check the stale `displayed_sms_id` policy after more cleanup:
+11. Re-check the stale `last_published_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
-     also set `displayed_sms_id=None`.
-9. Verify live SMS add/delete/change behavior on a working SIM.
-10. Add focused tests around reconnect/lifecycle ordering where practical.
-11. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+     also set `last_published_sms_id=None`.
+12. Verify live SMS add/delete/change behavior on a working SIM.
+13. Add focused tests around reconnect/lifecycle ordering where practical.
+14. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.
 
 ## Recent DBus Cleanup Notes

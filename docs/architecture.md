@@ -182,13 +182,115 @@ current low-risk evolution path remains variant 2:
 - MQTT sorts them for UI use;
 - MQTT requests a snapshot only for the currently needed SMS.
 
+## Core Command Plane (Planned)
+
+The daemon is evolving from a pure DBus<->MQTT bridge into a small control
+core that can keep enforcing modem policy even when MQTT is unavailable.
+
+The next architecture step is to add an explicit core layer with three
+responsibilities:
+
+- load and persist operational settings;
+- enforce number-based policy for outgoing actions and remote commands;
+- execute privileged SMS/DTMF command flows independently of MQTT health.
+
+The intended shape is:
+
+```text
+DBus adapter <-> Core runtime <-> MQTT adapter
+```
+
+Where:
+
+- DBus remains the source of truth for modem, SMS, call, and DTMF events;
+- Core decides whether an event is a user-facing modem event or an internal
+  command event;
+- MQTT becomes an optional frontend that can disconnect without disabling the
+  command plane.
+
+### Number Lists
+
+The current whitelist idea is being split into two independent lists:
+
+1. `command list`
+   - numbers allowed to control daemon behavior through SMS commands or future
+     DTMF commands;
+   - Core may send SMS replies and place confirmation calls to these numbers;
+   - these numbers should not be exposed in MQTT.
+2. `send list`
+   - numbers that MQTT-driven automation is allowed to use as SMS/call
+     destinations;
+   - these numbers may be exposed through MQTT so automation scripts can see
+     where user-driven outbound traffic is allowed.
+
+The two lists may intersect arbitrarily. They are separate policy domains, not
+different flags on one visible MQTT list.
+
+Each list has one default number:
+
+- `default_command_number`
+- `default_send_number`
+
+The defaults may point to the same physical phone number, but both concepts
+must exist in configuration/state. If either default is missing, the daemon
+may still start, but it should enter a degraded mode:
+
+- command SMS/DTMF handling is disabled;
+- outbound SMS/calls are rejected before any real DBus action.
+
+### Command Traffic Handling
+
+Incoming modem traffic is no longer assumed to be always user-facing.
+
+Planned rule:
+
+- ordinary incoming SMS continue through the current DBus -> MQTT projection;
+- command SMS are intercepted by Core, authorized, executed, logged, and then
+  deleted without reaching MQTT;
+- future command calls / DTMF sessions are also handled at Core level;
+- MQTT may optionally receive only a coarse status such as "incoming
+  controller" for command calls, but not command payload/details.
+
+This keeps the operational command channel alive even when the MQTT frontend is
+down or intentionally unavailable.
+
+### Persistent State
+
+No database is planned for this configuration layer.
+
+The preferred direction is:
+
+- static configuration in TOML;
+- dynamic operational state in TOML as well, or a very similar simple file;
+- atomic rewrite on change.
+
+This is intended to hold at least:
+
+- command-list numbers;
+- send-list numbers;
+- their defaults;
+- future provenance/role metadata needed for command-side list management.
+
+### Audit Logging
+
+Command execution, authorization failures, and list-changing operations should
+be logged separately from ordinary device chatter.
+
+Planned approach:
+
+- use a dedicated log target such as `AUDIT` or `CORE`;
+- optionally mirror that target to a separate configured log file;
+- keep normal runtime logging quiet while still preserving an operator-visible
+  audit trail.
+
 ## Lifecycle Model
 
-MQTT is the primary lifecycle gate. If MQTT is unavailable, the daemon is not
-useful: there is nowhere to publish state and nowhere to receive user commands
-from. In this state, DBus work must be fully stopped.
+### Current Implementation
 
-Runtime shape:
+MQTT is still the primary lifecycle gate in the implemented code. If MQTT is
+unavailable, DBus work is fully stopped.
+
+Runtime shape today:
 
 ```text
 connect MQTT
@@ -200,7 +302,7 @@ connect MQTT
   -> retry MQTT
 ```
 
-Consequences:
+Consequences today:
 
 - When MQTT is disconnected, do not keep DBus subscriptions alive.
 - Do not queue DBus events while MQTT is down.
@@ -208,12 +310,50 @@ Consequences:
 - If DBus is lost while MQTT is connected, keep MQTT alive, mark ModemManager as
   unavailable, retry DBus, and republish fresh state after DBus recovery.
 
-The top-level supervisor still lives in `main.rs`, but subsystem lifecycle
-details now live one layer lower:
+The current top-level supervisor still lives in `main.rs`, but subsystem
+lifecycle details now live one layer lower:
 
 - `src/mqtt.rs::run_lifecycle()` owns one MQTT session from connect to stop;
 - `src/dbus.rs::run_lifecycle()` owns DBus reconnect behavior while that MQTT
   session is alive.
+
+### Planned Evolution
+
+The current MQTT-gated lifecycle is no longer sufficient once command SMS and
+DTMF must keep working without MQTT.
+
+The planned direction is:
+
+```text
+load config/state
+  -> start Core runtime
+  -> start DBus adapter and keep it alive
+  -> start MQTT adapter if available
+  -> keep Core + DBus alive across MQTT loss/reconnect
+  -> stop everything only on daemon shutdown or fatal Core failure
+```
+
+Consequences of the planned model:
+
+- DBus becomes part of the always-on command plane, not a child of MQTT;
+- MQTT reconnects no longer force DBus/Core teardown;
+- command SMS/DTMF remain functional while MQTT is disconnected;
+- MQTT becomes a projection/control adapter, not the owner of runtime truth;
+- outbound actions requested from MQTT are still re-validated inside Core
+  before DBus method calls.
+
+The first lifecycle refactor should therefore aim at introducing an explicit
+Core runtime and then flipping the supervision order from:
+
+```text
+MQTT -> DBus
+```
+
+to:
+
+```text
+Core + DBus -> optional MQTT
+```
 
 ## Availability Semantics
 
