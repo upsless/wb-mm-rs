@@ -168,13 +168,21 @@ degraded mode where:
 ### Visibility and Routing Rules
 
 - Ordinary user-facing incoming SMS continue to flow into MQTT.
-- Command SMS are consumed by Core, executed if authorized, logged, replied to
-  if needed, and deleted without reaching MQTT.
-- Future command calls / DTMF sessions should follow the same rule.
+- Core treats only `#...` traffic as a candidate for kernel-level commands.
+- After `#`, Core matches the command name at the beginning of the SMS/DTMF
+  payload.
+- If the command name is known:
+  - authorized numbers get execution or syntax/help feedback from Core;
+  - unauthorized numbers produce an audit event and do not reach MQTT.
+- If the command name is unknown, that `#...` traffic is not a Core command
+  and may continue through ordinary MQTT-side policy.
+- Future command calls / DTMF sessions should follow the same split.
 - MQTT may optionally receive only a coarse incoming-controller status for
   command calls, not command payload/details.
 - Outbound requests initiated from MQTT must be checked against the send list
   in Core even if the UI already disables invalid actions.
+- Acceptance of ordinary non-command SMS/calls into MQTT should be a separate
+  policy switch, independent from command recognition/authorization.
 
 ### Persistence and Logging
 
@@ -184,6 +192,10 @@ degraded mode where:
 - Command execution, authorization failures, and list-changing operations
   should be logged under a dedicated target such as `AUDIT` or `CORE`, with an
   optional separate audit log file.
+- Command-list publication into MQTT should also be configurable:
+  - completely disabled;
+  - published but hidden;
+  - published and visible as readonly controls.
 
 ## Current Shared Vocabulary
 

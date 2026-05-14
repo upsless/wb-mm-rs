@@ -245,14 +245,32 @@ Incoming modem traffic is no longer assumed to be always user-facing.
 Planned rule:
 
 - ordinary incoming SMS continue through the current DBus -> MQTT projection;
-- command SMS are intercepted by Core, authorized, executed, logged, and then
-  deleted without reaching MQTT;
+- Core considers only `#...` traffic as a candidate for kernel-level commands;
+- after `#`, Core checks the command name at the beginning of the SMS/DTMF
+  payload;
+- if the command name is known, the message/session is claimed by Core and no
+  longer belongs to MQTT traffic;
+- for known commands from authorized numbers, Core executes the command or
+  returns syntax/help feedback without leaking that attempt into MQTT;
+- for known commands from unauthorized numbers, Core writes an audit event and
+  does not pass the attempt into MQTT;
+- `#...` traffic with an unknown command name is not considered a Core command
+  and may continue through ordinary MQTT-side policy;
 - future command calls / DTMF sessions are also handled at Core level;
 - MQTT may optionally receive only a coarse status such as "incoming
   controller" for command calls, but not command payload/details.
 
 This keeps the operational command channel alive even when the MQTT frontend is
 down or intentionally unavailable.
+
+The important split is:
+
+- **command recognition**: `#` + known command name at the start;
+- **command authorization**: sender number belongs to `command list`;
+- **ordinary traffic policy**: whether non-command SMS/calls are allowed to
+  reach MQTT at all.
+
+These are separate concerns and should remain separately configurable.
 
 ### Persistent State
 
@@ -269,6 +287,11 @@ This is intended to hold at least:
 - command-list numbers;
 - send-list numbers;
 - their defaults;
+- whether ordinary SMS/calls should be accepted only from command-list
+  numbers before reaching MQTT;
+- whether command-list data should be published into MQTT at all;
+- if published, whether command-list controls should be visible or hidden in
+  the UI;
 - future provenance/role metadata needed for command-side list management.
 
 ### Audit Logging
