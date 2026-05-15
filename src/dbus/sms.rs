@@ -14,7 +14,7 @@ use zbus::{
 
 use super::connection::emit_event;
 use super::logstrings;
-use crate::common::{AppConfig, DBUS_SMS_INVENTORY_COMMAND_CHANNEL_CAPACITY};
+use crate::common::DBUS_SMS_INVENTORY_COMMAND_CHANNEL_CAPACITY;
 use crate::dbus::schema;
 use crate::domain::{DbusEvent, SmsInventoryEntry};
 
@@ -680,9 +680,9 @@ pub(super) async fn send_sms(
     modem_id: &schema::ModemId,
     recipient: &str,
     text: &str,
-    config: &AppConfig,
+    allow_outgoing_sms: bool,
 ) -> Result<()> {
-    if !config.allow_outgoing_sms() {
+    if !allow_outgoing_sms {
         anyhow::bail!("SMS sending is not allowed by configuration");
     }
 

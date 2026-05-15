@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::debug;
 use zbus::{Connection, connection::Builder};
 
-use crate::common::{AppConfig, wait_for_shutdown};
+use crate::common::wait_for_shutdown;
 use crate::domain::{DbusCommand, DbusEvent};
 
 use super::logstrings;
@@ -36,7 +35,8 @@ pub(super) async fn emit_event(event_tx: &mpsc::Sender<DbusEvent>, event: DbusEv
 /// Connects to DBus, publishes the initial ModemManager state, and forwards
 /// ModemManager changes until shutdown or connection loss.
 pub async fn run(
-    config: Arc<AppConfig>,
+    dbus_address: Option<String>,
+    allow_outgoing_sms: bool,
     mut shutdown_rx: watch::Receiver<bool>,
     mut command_rx: mpsc::Receiver<DbusCommand>,
     event_tx: mpsc::Sender<DbusEvent>,
@@ -45,7 +45,7 @@ pub async fn run(
     // connection attempt against shutdown. This lets the daemon exit cleanly
     // even if the bridge is slow or disappears mid-connect.
     let connection = tokio::select! {
-        result = connect(config.dbus_address()) => result?,
+        result = connect(dbus_address.as_deref()) => result?,
         result = wait_for_shutdown(&mut shutdown_rx) => {
             result?;
             debug!(target: logstrings::LOG_TARGET, "{}", logstrings::DBUS_STOPPED_BEFORE_CONNECT_MESSAGE);
@@ -55,7 +55,7 @@ pub async fn run(
 
     debug!(target: logstrings::LOG_TARGET, "{}", logstrings::DBUS_CONNECTED_MESSAGE);
 
-    let mut runtime = DbusRuntime::new(connection, event_tx, config).await?;
+    let mut runtime = DbusRuntime::new(connection, event_tx, allow_outgoing_sms).await?;
 
     loop {
         let event = tokio::select! {

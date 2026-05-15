@@ -7,14 +7,13 @@ mod schema;
 mod sms;
 
 use anyhow::Result;
-use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
 use crate::common::{
-    AppConfig, DBUS_COMMAND_CHANNEL_CAPACITY, DBUS_RECONNECT_FAST_ATTEMPTS,
-    DBUS_RECONNECT_FAST_INTERVAL, DBUS_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+    DBUS_COMMAND_CHANNEL_CAPACITY, DBUS_RECONNECT_FAST_ATTEMPTS, DBUS_RECONNECT_FAST_INTERVAL,
+    DBUS_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
 };
 use crate::domain::{DbusCommand, DbusEvent};
 
@@ -35,21 +34,23 @@ pub enum LifecycleExit {
 /// `LifecycleExit::MqttEnded` when the MQTT task terminates and the DBus
 /// session should be torn down.
 pub async fn run_lifecycle(
-    config: Arc<AppConfig>,
+    dbus_address: Option<String>,
+    allow_outgoing_sms: bool,
     shutdown_rx: &mut watch::Receiver<bool>,
     mqtt_stop_tx: &watch::Sender<bool>,
     mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
     event_tx: mpsc::Sender<DbusEvent>,
-    command_tx: &watch::Sender<Option<mpsc::Sender<DbusCommand>>>,
+    dbus_command_current_tx: &watch::Sender<Option<mpsc::Sender<DbusCommand>>>,
 ) -> Result<LifecycleExit> {
     let mut retry_attempt = 1;
 
     loop {
         let (dbus_command_tx, dbus_command_rx) = mpsc::channel(DBUS_COMMAND_CHANNEL_CAPACITY);
-        let _ = command_tx.send(Some(dbus_command_tx));
+        let _ = dbus_command_current_tx.send(Some(dbus_command_tx));
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
         let mut dbus_task = tokio::spawn(connection::run(
-            config.clone(),
+            dbus_address.clone(),
+            allow_outgoing_sms,
             dbus_stop_rx,
             dbus_command_rx,
             event_tx.clone(),
@@ -58,7 +59,7 @@ pub async fn run_lifecycle(
         let retry_delay = tokio::select! {
             result = wait_for_shutdown(shutdown_rx) => {
                 result?;
-                let _ = command_tx.send(None);
+                let _ = dbus_command_current_tx.send(None);
                 stop_task("DBus", dbus_stop_tx, dbus_task).await?;
                 let _ = mqtt_stop_tx.send(true);
                 return Ok(LifecycleExit::Shutdown);
@@ -66,14 +67,14 @@ pub async fn run_lifecycle(
             mqtt_result = &mut *mqtt_task => {
                 log_unexpected_exit("MQTT", mqtt_result)?;
                 info!(target: LOG_TARGET, "Stopping DBus because MQTT connection is unavailable.");
-                let _ = command_tx.send(None);
+                let _ = dbus_command_current_tx.send(None);
                 let _ = dbus_stop_tx.send(true);
                 stop_finished_task("DBus", dbus_task).await?;
                 return Ok(LifecycleExit::MqttEnded);
             }
             dbus_result = &mut dbus_task => {
                 log_unexpected_exit("DBus", dbus_result)?;
-                let _ = command_tx.send(None);
+                let _ = dbus_command_current_tx.send(None);
                 debug!(target: LOG_TARGET, "{}", logstrings::manager_deleted_message());
                 if event_tx.send(DbusEvent::ManagerDeleted).await.is_err() {
                     debug!(
@@ -97,13 +98,13 @@ pub async fn run_lifecycle(
         tokio::select! {
             result = wait_for_shutdown(shutdown_rx) => {
                 result?;
-                let _ = command_tx.send(None);
+                let _ = dbus_command_current_tx.send(None);
                 let _ = mqtt_stop_tx.send(true);
                 return Ok(LifecycleExit::Shutdown);
             }
             mqtt_result = &mut *mqtt_task => {
                 log_unexpected_exit("MQTT", mqtt_result)?;
-                let _ = command_tx.send(None);
+                let _ = dbus_command_current_tx.send(None);
                 return Ok(LifecycleExit::MqttEnded);
             }
             _ = sleep(retry_delay) => {}

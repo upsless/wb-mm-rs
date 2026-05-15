@@ -109,6 +109,10 @@ incoming SMS picker model:
 - `DbusCommand` flows from MQTT back into DBus.
 - `src/common.rs` now stays deliberately small and holds only truly shared
   runtime helpers such as `wait_for_shutdown()`.
+- CLI-derived runtime settings are intentionally passed top-down through the
+  lifecycle and constructor surfaces instead of being hidden behind a shared
+  config object. This keeps dependencies explicit and gives tests the freedom
+  to wire only the values relevant to each subsystem.
 
 The current mental model is:
 

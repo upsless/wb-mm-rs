@@ -7,12 +7,11 @@ mod state;
 
 use anyhow::{Context, Result, bail};
 use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS, Transport};
-use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::common::{
-    AppConfig, MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
+    MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
 };
 use crate::domain::{DbusCommand, DbusEvent};
 use crate::mqtt::frontend::MqttFrontend;
@@ -24,14 +23,15 @@ const MQTT_CLIENT_ID_PREFIX: &str = "wb-mm-mqtt";
 const MQTT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub async fn run_lifecycle(
-    config: Arc<AppConfig>,
+    mqtt_address: Option<String>,
+    allow_outgoing_sms: bool,
     mut shutdown_rx: watch::Receiver<bool>,
     mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
-    mut dbus_command_rx: watch::Receiver<Option<mpsc::Sender<DbusCommand>>>,
+    mut dbus_command_current_rx: watch::Receiver<Option<mpsc::Sender<DbusCommand>>>,
 ) -> Result<()> {
-    let mqtt_options = build_mqtt_options(config.mqtt_address())?;
+    let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
     let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
-    let mut frontend = MqttFrontend::new(client.clone(), config.clone());
+    let mut frontend = MqttFrontend::new(client.clone(), allow_outgoing_sms);
     let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
     let (incoming_publish_tx, mut incoming_publish_rx) =
         mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);
@@ -54,21 +54,21 @@ pub async fn run_lifecycle(
                     frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
                     break;
                 };
-                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
+                let dbus_command_current_tx = dbus_command_current_rx.borrow().clone();
                 frontend
-                    .handle_dbus_event(event, current_dbus_command_tx.as_ref())
+                    .handle_dbus_event(event, dbus_command_current_tx.as_ref())
                     .await?;
             }
             maybe_publish = incoming_publish_rx.recv() => {
                 let Some(publish) = maybe_publish else {
                     return Ok(());
                 };
-                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
+                let dbus_command_current_tx = dbus_command_current_rx.borrow().clone();
                 frontend
-                    .handle_incoming_publish(publish, current_dbus_command_tx.as_ref())
+                    .handle_incoming_publish(publish, dbus_command_current_tx.as_ref())
                     .await?;
             }
-            changed = dbus_command_rx.changed() => {
+            changed = dbus_command_current_rx.changed() => {
                 if changed.is_err() {
                     frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
                     break;
@@ -86,10 +86,10 @@ pub async fn run_lifecycle(
 }
 
 fn build_mqtt_options(mqtt_address: Option<&str>) -> Result<MqttOptions> {
-    let mqtt_address = mqtt_address.unwrap_or(DEFAULT_MQTT_ADDRESS);
+    let endpoint = mqtt_address.unwrap_or(DEFAULT_MQTT_ADDRESS);
     let client_id = format!("{MQTT_CLIENT_ID_PREFIX}-{}", std::process::id());
 
-    let mut mqtt_options = match parse_mqtt_endpoint(mqtt_address)? {
+    let mut mqtt_options = match parse_mqtt_endpoint(endpoint)? {
         MqttEndpoint::Unix { path } => {
             let mut options = MqttOptions::new(client_id, path, DEFAULT_MQTT_PORT);
             options.set_transport(Transport::unix());

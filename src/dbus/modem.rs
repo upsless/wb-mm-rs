@@ -23,21 +23,21 @@ pub(super) struct ModemWatcher {
 
 impl ModemWatcher {
     pub(super) fn new(
-        id: schema::ModemId,
+        modem_id: schema::ModemId,
         connection: Connection,
         event_tx: mpsc::Sender<DbusEvent>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::channel(DBUS_MODEM_COMMAND_CHANNEL_CAPACITY);
         let worker = ModemWatcherWorker {
-            id: id.clone(),
+            id: modem_id.clone(),
             connection: connection.clone(),
             event_tx: event_tx.clone(),
             command_rx,
         };
-        let modem_id = id.clone();
+        let log_modem_id = modem_id.clone();
         let task = Some(tokio::spawn(async move {
             if let Err(err) = worker.run().await {
-                debug!(target: logstrings::LOG_TARGET, "Modem {} watcher failed: {err:#}", modem_id.0);
+                debug!(target: logstrings::LOG_TARGET, "Modem {} watcher failed: {err:#}", log_modem_id.0);
             }
         }));
 

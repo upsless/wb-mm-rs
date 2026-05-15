@@ -31,6 +31,10 @@ shared vocabulary:
   neutral domain types used by both subsystems.
 - `src/common.rs`: only small cross-runtime helpers such as
   `wait_for_shutdown()`.
+- CLI-derived runtime settings are intentionally passed top-down through
+  function parameters and constructors instead of being stored in a shared
+  runtime config object. This keeps subsystem dependencies explicit and makes
+  isolated tests easier to wire.
 
 Today MQTT is still the primary lifecycle gate. If MQTT is disconnected, DBus
 work is stopped and runtime state is dropped until MQTT reconnects.

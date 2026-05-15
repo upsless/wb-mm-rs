@@ -1,8 +1,6 @@
 use clap::ArgAction;
 use clap::Parser;
 
-use crate::common::AppConfig;
-
 #[derive(Debug, Parser, Clone)]
 #[command(name = "wb-mm-mqtt")]
 #[command(about = "WirenBoard ModemManager MQTT bridge daemon")]
@@ -36,15 +34,4 @@ pub struct Cli {
 
     #[arg(short = 'V', long = "version", action = ArgAction::Version, help = "Print version")]
     pub version: Option<bool>,
-}
-
-impl From<Cli> for AppConfig {
-    fn from(value: Cli) -> Self {
-        AppConfig::new(
-            value.dbus_address,
-            value.mqtt_address,
-            value.allow_outgoing_sms,
-            value.log_level,
-        )
-    }
 }

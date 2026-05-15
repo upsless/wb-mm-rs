@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -15,7 +14,6 @@ use super::connection::emit_event;
 use super::logstrings;
 use super::modem::ModemWatcher;
 use super::sms::{delete_sms, query_sms_snapshot, send_sms};
-use crate::common::AppConfig;
 use crate::dbus::schema;
 use crate::domain::{DbusCommand, DbusEvent, OutgoingSmsInfo, OutgoingSmsStatus};
 use time::{OffsetDateTime, UtcOffset};
@@ -80,7 +78,7 @@ impl ManagerStreams {
 
 pub(super) struct ManagerWatcher {
     pub(super) presence: ManagerPresence,
-    config: Arc<AppConfig>,
+    allow_outgoing_sms: bool,
     state: ManagerState,
     pub(super) streams: ManagerStreams,
 }
@@ -109,10 +107,10 @@ pub(super) enum LoopFlow {
 }
 
 impl ManagerWatcher {
-    pub(super) fn new(presence: ManagerPresence, config: Arc<AppConfig>) -> Self {
+    pub(super) fn new(presence: ManagerPresence, allow_outgoing_sms: bool) -> Self {
         Self {
             presence,
-            config,
+            allow_outgoing_sms,
             state: ManagerState::default(),
             streams: ManagerStreams::default(),
         }
@@ -292,7 +290,7 @@ impl ManagerWatcher {
                     &modem_id,
                     &recipient,
                     &text,
-                    self.config.as_ref(),
+                    self.allow_outgoing_sms,
                 )
                 .await
                 {

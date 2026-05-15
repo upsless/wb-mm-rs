@@ -6,7 +6,6 @@ mod mqtt;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -16,8 +15,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
 use crate::common::{
-    AppConfig, DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS,
-    MQTT_RECONNECT_FAST_INTERVAL, MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+    DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
+    MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
 };
 use crate::domain::DbusCommand;
 
@@ -25,8 +24,14 @@ const LOG_TARGET: &str = "MAIN";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Arc::new(AppConfig::from(Cli::parse()));
-    init_logging(config.log_level())?;
+    let Cli {
+        dbus_address,
+        mqtt_address,
+        log_level,
+        allow_outgoing_sms,
+        ..
+    } = Cli::parse();
+    init_logging(log_level.as_deref())?;
 
     info!(target: LOG_TARGET, "Starting wb-mm-mqtt");
 
@@ -41,7 +46,12 @@ async fn main() -> Result<()> {
         signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
-    let mut supervisor_task = tokio::spawn(run_supervisor(config, shutdown_rx));
+    let mut supervisor_task = tokio::spawn(run_supervisor(
+        dbus_address,
+        mqtt_address,
+        allow_outgoing_sms,
+        shutdown_rx,
+    ));
 
     // `tokio::select!` waits for whichever async branch completes first.
     // In our case that is either:
@@ -75,7 +85,9 @@ async fn main() -> Result<()> {
 /// Starts MQTT and DBus sessions and restarts them according to the configured
 /// reconnect intervals.
 async fn run_supervisor(
-    config: Arc<AppConfig>,
+    dbus_address: Option<String>,
+    mqtt_address: Option<String>,
+    allow_outgoing_sms: bool,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut mqtt_retry_attempt = 1;
@@ -86,23 +98,25 @@ async fn run_supervisor(
         }
 
         let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
-        let (actual_dbus_command_tx, actual_dbus_command_rx) =
+        let (dbus_command_current_tx, dbus_command_current_rx) =
             watch::channel(None::<mpsc::Sender<DbusCommand>>);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
         let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
-            config.clone(),
+            mqtt_address.clone(),
+            allow_outgoing_sms,
             mqtt_stop_rx.clone(),
             dbus_event_rx,
-            actual_dbus_command_rx,
+            dbus_command_current_rx,
         ));
 
         match dbus::run_lifecycle(
-            config.clone(),
+            dbus_address.clone(),
+            allow_outgoing_sms,
             &mut shutdown_rx,
             &mqtt_stop_tx,
             &mut mqtt_task,
             dbus_event_tx,
-            &actual_dbus_command_tx,
+            &dbus_command_current_tx,
         )
         .await?
         {
