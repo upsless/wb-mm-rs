@@ -23,25 +23,20 @@ pub use crate::domain::{
 };
 pub use logstrings::LOG_TARGET;
 
-pub enum LifecycleExit {
-    Shutdown,
-    MqttEnded,
-}
-
-/// Runs and reconnects DBus for as long as the current MQTT session is alive.
+/// Runs and reconnects DBus until daemon shutdown.
 ///
-/// Returns `LifecycleExit::Shutdown` on a graceful shutdown signal, or
-/// `LifecycleExit::MqttEnded` when the MQTT task terminates and the DBus
-/// session should be torn down.
+/// DBus now owns its own long-lived lifecycle and can be restarted on explicit
+/// resync requests from other subsystems, for example when MQTT reconnects and
+/// needs a fresh projection of live modem state.
 pub async fn run_lifecycle(
     dbus_address: Option<String>,
-    shutdown_rx: &mut watch::Receiver<bool>,
-    mqtt_stop_tx: &watch::Sender<bool>,
-    mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
+    mut shutdown_rx: watch::Receiver<bool>,
     event_tx: mpsc::Sender<DbusEvent>,
-    command_tx: &watch::Sender<Option<mpsc::Sender<DbusCommand>>>,
-) -> Result<LifecycleExit> {
+    command_tx: watch::Sender<Option<mpsc::Sender<DbusCommand>>>,
+    mut resync_rx: watch::Receiver<u64>,
+) -> Result<()> {
     let mut retry_attempt = 1;
+    let mut resync_generation = *resync_rx.borrow();
 
     loop {
         let (dbus_command_tx, dbus_command_rx) = mpsc::channel(DBUS_COMMAND_CHANNEL_CAPACITY);
@@ -55,20 +50,28 @@ pub async fn run_lifecycle(
         ));
 
         let retry_delay = tokio::select! {
-            result = wait_for_shutdown(shutdown_rx) => {
+            result = wait_for_shutdown(&mut shutdown_rx) => {
                 result?;
                 let _ = command_tx.send(None);
                 stop_task("DBus", dbus_stop_tx, dbus_task).await?;
-                let _ = mqtt_stop_tx.send(true);
-                return Ok(LifecycleExit::Shutdown);
+                return Ok(());
             }
-            mqtt_result = &mut *mqtt_task => {
-                log_unexpected_exit("MQTT", mqtt_result)?;
-                info!(target: LOG_TARGET, "Stopping DBus because MQTT connection is unavailable.");
-                let _ = command_tx.send(None);
-                let _ = dbus_stop_tx.send(true);
-                stop_finished_task("DBus", dbus_task).await?;
-                return Ok(LifecycleExit::MqttEnded);
+            changed = resync_rx.changed() => {
+                if changed.is_ok() {
+                    let next_generation = *resync_rx.borrow();
+                    if next_generation != resync_generation {
+                        resync_generation = next_generation;
+                        info!(
+                            target: LOG_TARGET,
+                            "Restarting DBus session to resync dependent frontend state."
+                        );
+                        let _ = command_tx.send(None);
+                        stop_task("DBus", dbus_stop_tx, dbus_task).await?;
+                        retry_attempt = 1;
+                        continue;
+                    }
+                }
+                continue;
             }
             dbus_result = &mut dbus_task => {
                 log_unexpected_exit("DBus", dbus_result)?;
@@ -94,16 +97,10 @@ pub async fn run_lifecycle(
         };
 
         tokio::select! {
-            result = wait_for_shutdown(shutdown_rx) => {
+            result = wait_for_shutdown(&mut shutdown_rx) => {
                 result?;
                 let _ = command_tx.send(None);
-                let _ = mqtt_stop_tx.send(true);
-                return Ok(LifecycleExit::Shutdown);
-            }
-            mqtt_result = &mut *mqtt_task => {
-                log_unexpected_exit("MQTT", mqtt_result)?;
-                let _ = command_tx.send(None);
-                return Ok(LifecycleExit::MqttEnded);
+                return Ok(());
             }
             _ = sleep(retry_delay) => {}
         }

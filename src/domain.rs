@@ -1,5 +1,91 @@
 use time::OffsetDateTime;
 
+pub const OUTGOING_SMS_RECIPIENT_DIGIT_COUNT: usize = 10;
+pub const OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES: [&str; 2] = ["8", "+7"];
+
+pub fn sanitize_phone_number(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let has_leading_plus = matches!(chars.next(), Some('+'));
+    let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
+
+    if has_leading_plus {
+        format!("+{digits}")
+    } else {
+        digits
+    }
+}
+
+pub fn canonicalize_phone_number(value: &str) -> String {
+    let sanitized = sanitize_phone_number(value);
+
+    if let Some(rest) = sanitized.strip_prefix("+7")
+        && rest.chars().count() == OUTGOING_SMS_RECIPIENT_DIGIT_COUNT
+    {
+        return format!("+7{rest}");
+    }
+
+    if let Some(rest) = sanitized.strip_prefix('8')
+        && rest.chars().count() == OUTGOING_SMS_RECIPIENT_DIGIT_COUNT
+    {
+        return format!("+7{rest}");
+    }
+
+    sanitized
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutgoingSmsValidationError {
+    EmptyRecipient,
+    EmptyText,
+    InvalidRecipientFormat,
+}
+
+impl OutgoingSmsValidationError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutgoingSmsValidationError::EmptyRecipient => "Recipient number is empty",
+            OutgoingSmsValidationError::EmptyText => "Outgoing SMS text is empty",
+            OutgoingSmsValidationError::InvalidRecipientFormat => {
+                "Recipient number does not match the allowed format"
+            }
+        }
+    }
+}
+
+pub fn validate_outgoing_sms_request(
+    recipient: &str,
+    text: &str,
+    check_phone_format: bool,
+) -> Result<(), OutgoingSmsValidationError> {
+    if recipient.is_empty() {
+        return Err(OutgoingSmsValidationError::EmptyRecipient);
+    }
+
+    if text.trim().is_empty() {
+        return Err(OutgoingSmsValidationError::EmptyText);
+    }
+
+    if !check_phone_format {
+        return Ok(());
+    }
+
+    let is_valid = OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES
+        .iter()
+        .find_map(|prefix| {
+            recipient
+                .strip_prefix(prefix)
+                .map(|suffix| suffix.chars().filter(|ch| ch.is_ascii_digit()).count())
+        })
+        == Some(OUTGOING_SMS_RECIPIENT_DIGIT_COUNT);
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(OutgoingSmsValidationError::InvalidRecipientFormat)
+    }
+}
+
 fn format_option_string(value: Option<&str>) -> String {
     value.unwrap_or("None").to_string()
 }
@@ -290,5 +376,6 @@ pub enum DbusCommand {
         modem_id: ModemId,
         recipient: String,
         text: String,
+        check_phone_format: bool,
     },
 }

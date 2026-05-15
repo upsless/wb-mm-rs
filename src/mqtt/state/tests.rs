@@ -1,8 +1,6 @@
-use super::{
-    MqttModemSmsState, MqttOutgoingSmsState, MqttSessionState,
-    OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES, OUTGOING_SMS_RECIPIENT_DIGIT_COUNT,
-};
+use super::{MqttModemSmsState, MqttOutgoingSmsState, MqttSessionState};
 use crate::dbus::{ModemId, SmsId, SmsSnapshot};
+use crate::domain::{OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES, OUTGOING_SMS_RECIPIENT_DIGIT_COUNT};
 use time::OffsetDateTime;
 
 #[test]

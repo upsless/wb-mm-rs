@@ -8,10 +8,12 @@ mod state;
 use anyhow::{Context, Result, bail};
 use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS, Transport};
 use tokio::sync::{mpsc, watch};
-use tracing::debug;
+use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info};
 
 use crate::common::{
-    MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
+    MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
+    MQTT_RECONNECT_SLOW_INTERVAL, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
 };
 use crate::domain::{DbusCommand, DbusEvent};
 use crate::mqtt::frontend::MqttFrontend;
@@ -25,56 +27,93 @@ const MQTT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60);
 pub async fn run_lifecycle(
     mqtt_address: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
-    mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
-    mut dbus_command_rx: watch::Receiver<Option<mpsc::Sender<DbusCommand>>>,
+    mut core_event_rx: mpsc::Receiver<DbusEvent>,
+    core_command_tx: mpsc::Sender<DbusCommand>,
+    dbus_resync_tx: watch::Sender<u64>,
 ) -> Result<()> {
-    let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
-    let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
-    let mut frontend = MqttFrontend::new(client.clone());
-    let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
-    let (incoming_publish_tx, mut incoming_publish_rx) =
-        mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);
-    let mut eventloop_task = tokio::spawn(r#loop::run_eventloop(
-        eventloop_stop_rx,
-        eventloop,
-        incoming_publish_tx,
-    ));
-    frontend.ensure_main_device().await?;
+    let mut retry_attempt = 1;
 
     loop {
-        tokio::select! {
-            result = wait_for_shutdown(&mut shutdown_rx) => {
-                result?;
-                frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
-                break;
-            }
-            maybe_event = dbus_event_rx.recv() => {
-                let Some(event) = maybe_event else {
-                    frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
+        let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
+        let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
+        let mut frontend = MqttFrontend::new(client.clone());
+        let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
+        let (incoming_publish_tx, incoming_publish_rx) =
+            mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);
+        let mut eventloop_task = tokio::spawn(r#loop::run_eventloop(
+            eventloop_stop_rx,
+            eventloop,
+            incoming_publish_tx,
+        ));
+
+        if let Err(err) = frontend.ensure_main_device().await {
+            let transport_closed = is_transport_closed_error(&err);
+            teardown_failed_session(&frontend, &eventloop_stop_tx, &mut eventloop_task).await;
+
+            if transport_closed {
+                let delay = reconnect_delay(retry_attempt);
+                info!(
+                    target: logstrings::LOG_TARGET,
+                    "MQTT transport disappeared during session bootstrap, retrying in {} second(s) (attempt {}).",
+                    delay.as_secs(),
+                    retry_attempt
+                );
+                retry_attempt += 1;
+                if wait_until_retry_or_shutdown(delay, &mut shutdown_rx, &mut core_event_rx).await?
+                {
                     break;
-                };
-                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
-                frontend
-                    .handle_dbus_event(event, current_dbus_command_tx.as_ref())
-                    .await?;
+                }
+                continue;
             }
-            maybe_publish = incoming_publish_rx.recv() => {
-                let Some(publish) = maybe_publish else {
-                    return Ok(());
-                };
-                let current_dbus_command_tx = dbus_command_rx.borrow().clone();
-                frontend
-                    .handle_incoming_publish(publish, current_dbus_command_tx.as_ref())
-                    .await?;
+
+            return Err(err.context("failed to bootstrap MQTT session"));
+        }
+
+        drop_stale_core_events(&mut core_event_rx);
+        request_dbus_resync(&dbus_resync_tx);
+
+        match run_session(
+            &mut frontend,
+            &eventloop_stop_tx,
+            &mut eventloop_task,
+            &mut shutdown_rx,
+            &mut core_event_rx,
+            &core_command_tx,
+            incoming_publish_rx,
+        )
+        .await
+        {
+            Ok(SessionExit::Shutdown) => break,
+            Ok(SessionExit::CoreEventChannelClosed) => {
+                return Ok(());
             }
-            changed = dbus_command_rx.changed() => {
-                if changed.is_err() {
-                    frontend.stop(&eventloop_stop_tx, &mut eventloop_task).await?;
+            Ok(SessionExit::TransportEnded) => {
+                let delay = reconnect_delay(retry_attempt);
+                info!(
+                    target: logstrings::LOG_TARGET,
+                    "MQTT connection lost, retrying in {} second(s) (attempt {}).",
+                    delay.as_secs(),
+                    retry_attempt
+                );
+                retry_attempt += 1;
+                if wait_until_retry_or_shutdown(delay, &mut shutdown_rx, &mut core_event_rx).await?
+                {
                     break;
                 }
             }
-            result = &mut eventloop_task => {
-                return r#loop::eventloop_result(result);
+            Err(err) => {
+                let delay = reconnect_delay(retry_attempt);
+                error!(
+                    target: logstrings::LOG_TARGET,
+                    "MQTT session failed: {err:#}. Retrying in {} second(s) (attempt {}).",
+                    delay.as_secs(),
+                    retry_attempt
+                );
+                retry_attempt += 1;
+                if wait_until_retry_or_shutdown(delay, &mut shutdown_rx, &mut core_event_rx).await?
+                {
+                    break;
+                }
             }
         }
     }
@@ -82,6 +121,127 @@ pub async fn run_lifecycle(
     debug!(target: logstrings::LOG_TARGET, "{}", logstrings::mqtt_stopped_message());
 
     Ok(())
+}
+
+async fn teardown_failed_session(
+    frontend: &MqttFrontend,
+    eventloop_stop_tx: &watch::Sender<bool>,
+    eventloop_task: &mut tokio::task::JoinHandle<Result<()>>,
+) {
+    let _ = eventloop_stop_tx.send(true);
+    let _ = frontend.disconnect_transport().await;
+    eventloop_task.abort();
+    let _ = eventloop_task.await;
+}
+
+fn is_transport_closed_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let text = cause.to_string();
+        text.contains("Failed to send mqtt requests to eventloop")
+            || text.contains("failed to poll MQTT event loop")
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionExit {
+    Shutdown,
+    TransportEnded,
+    CoreEventChannelClosed,
+}
+
+async fn run_session(
+    frontend: &mut MqttFrontend,
+    eventloop_stop_tx: &watch::Sender<bool>,
+    eventloop_task: &mut tokio::task::JoinHandle<Result<()>>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    core_event_rx: &mut mpsc::Receiver<DbusEvent>,
+    core_command_tx: &mpsc::Sender<DbusCommand>,
+    mut incoming_publish_rx: mpsc::Receiver<rumqttc::Publish>,
+) -> Result<SessionExit> {
+    loop {
+        tokio::select! {
+            result = wait_for_shutdown(shutdown_rx) => {
+                result?;
+                frontend.stop(eventloop_stop_tx, eventloop_task).await?;
+                return Ok(SessionExit::Shutdown);
+            }
+            maybe_event = core_event_rx.recv() => {
+                let Some(event) = maybe_event else {
+                    frontend.stop(eventloop_stop_tx, eventloop_task).await?;
+                    return Ok(SessionExit::CoreEventChannelClosed);
+                };
+                frontend
+                    .handle_dbus_event(event, Some(core_command_tx))
+                    .await?;
+            }
+            maybe_publish = incoming_publish_rx.recv() => {
+                let Some(publish) = maybe_publish else {
+                    return Ok(SessionExit::TransportEnded);
+                };
+                frontend
+                    .handle_incoming_publish(publish, Some(core_command_tx))
+                    .await?;
+            }
+            result = &mut *eventloop_task => {
+                match r#loop::eventloop_result(result) {
+                    Ok(()) => return Ok(SessionExit::TransportEnded),
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+    }
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    if attempt <= MQTT_RECONNECT_FAST_ATTEMPTS {
+        MQTT_RECONNECT_FAST_INTERVAL
+    } else {
+        MQTT_RECONNECT_SLOW_INTERVAL
+    }
+}
+
+async fn wait_until_retry_or_shutdown(
+    delay: Duration,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    core_event_rx: &mut mpsc::Receiver<DbusEvent>,
+) -> Result<bool> {
+    let sleep = sleep(delay);
+    tokio::pin!(sleep);
+
+    loop {
+        tokio::select! {
+            result = wait_for_shutdown(shutdown_rx) => {
+                result?;
+                return Ok(true);
+            }
+            maybe_event = core_event_rx.recv() => {
+                if maybe_event.is_none() {
+                    return Ok(false);
+                }
+            }
+            _ = &mut sleep => return Ok(false),
+        }
+    }
+}
+
+fn drop_stale_core_events(core_event_rx: &mut mpsc::Receiver<DbusEvent>) {
+    let mut dropped = 0usize;
+
+    while core_event_rx.try_recv().is_ok() {
+        dropped += 1;
+    }
+
+    if dropped > 0 {
+        debug!(
+            target: logstrings::LOG_TARGET,
+            "Dropped {dropped} stale Core event(s) before rebuilding MQTT session state"
+        );
+    }
+}
+
+fn request_dbus_resync(dbus_resync_tx: &watch::Sender<u64>) {
+    let next_generation = dbus_resync_tx.borrow().saturating_add(1);
+    let _ = dbus_resync_tx.send(next_generation);
 }
 
 fn build_mqtt_options(mqtt_address: Option<&str>) -> Result<MqttOptions> {

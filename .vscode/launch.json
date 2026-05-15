@@ -20,7 +20,7 @@
         "--dbus-address",
         "unixexec:path=ssh,argv1=-T,argv2=-q,argv3=root@wb.loc,argv4=systemd-stdio-bridge",
         "--mqtt-address",
-        "tcp://wb.loc:1883"
+        "tcp://wb.loc:1883",
       ],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated",

@@ -1,12 +1,10 @@
 use crate::dbus::{OutgoingSmsInfo, OutgoingSmsStatus, SmsId, SmsSnapshot};
+use crate::domain::validate_outgoing_sms_request;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::dbus::ModemId;
-
-pub(super) const OUTGOING_SMS_RECIPIENT_DIGIT_COUNT: usize = 10;
-pub(super) const OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES: [&str; 2] = ["8", "+7"];
 
 #[derive(Debug, Default)]
 pub(super) struct MqttSessionState {
@@ -238,22 +236,7 @@ impl MqttOutgoingSmsState {
     }
 
     pub(super) fn is_ready_to_send(&self) -> bool {
-        if self.recipient.is_empty() || self.text.trim().is_empty() {
-            return false;
-        }
-
-        if !self.check_phone_format {
-            return true;
-        }
-
-        OUTGOING_SMS_ALLOWED_RECIPIENT_PREFIXES
-            .iter()
-            .find_map(|prefix| {
-                self.recipient
-                    .strip_prefix(prefix)
-                    .map(|suffix| suffix.chars().filter(|ch| ch.is_ascii_digit()).count())
-            })
-            == Some(OUTGOING_SMS_RECIPIENT_DIGIT_COUNT)
+        validate_outgoing_sms_request(&self.recipient, &self.text, self.check_phone_format).is_ok()
     }
 
     pub(super) fn last_sent(&self) -> Option<&MqttLastSentSmsState> {

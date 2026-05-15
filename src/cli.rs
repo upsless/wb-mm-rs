@@ -9,4 +9,7 @@ pub struct Cli {
 
     #[arg(long)]
     pub mqtt_address: Option<String>,
+
+    #[arg(long = "command-number")]
+    pub command_numbers: Vec<String>,
 }

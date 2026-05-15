@@ -9,7 +9,7 @@ use crate::common::MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY;
 use crate::dbus::{
     ManagerUpdate, ModemId, ModemInfo, ModemUpdate, OutgoingSmsInfo, SmsId, SmsSnapshot, SmsUpdate,
 };
-use crate::domain::{DbusCommand, DbusEvent, SmsInventoryEntry};
+use crate::domain::{DbusCommand, DbusEvent, SmsInventoryEntry, sanitize_phone_number};
 use crate::mqtt::logstrings;
 use crate::mqtt::r#loop::eventloop_result;
 use crate::mqtt::publish::{MqttPublisher, UnavailableModemPublishState};
@@ -31,6 +31,10 @@ impl MqttFrontend {
 
     pub(super) async fn ensure_main_device(&mut self) -> Result<()> {
         self.publisher.ensure_main_device().await
+    }
+
+    pub(super) async fn disconnect_transport(&self) -> Result<()> {
+        self.publisher.disconnect().await
     }
 
     pub(super) async fn stop(
@@ -118,17 +122,9 @@ impl MqttFrontend {
             };
 
             if let Some(modem) = self.state.modems.get_mut(&modem_id) {
-                let trimmed = payload.trim();
-                let mut chars = trimmed.chars();
-                let has_leading_plus = matches!(chars.next(), Some('+'));
-                let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
-                let sanitized = if has_leading_plus {
-                    format!("+{digits}")
-                } else {
-                    digits
-                };
-
-                modem.outgoing_sms_state.set_recipient(sanitized);
+                modem
+                    .outgoing_sms_state
+                    .set_recipient(sanitize_phone_number(payload));
             }
             self.sync_modem_outgoing_sms_state(&modem_id).await?;
             return Ok(());
@@ -561,13 +557,16 @@ impl MqttFrontend {
         modem_id: ModemId,
         dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
-        let Some((can_send, recipient, text)) = self.state.modems.get(&modem_id).map(|modem| {
-            (
-                modem.outgoing_sms_state.is_ready_to_send(),
-                modem.outgoing_sms_state.recipient().to_string(),
-                modem.outgoing_sms_state.text().to_string(),
-            )
-        }) else {
+        let Some((can_send, recipient, text, check_phone_format)) =
+            self.state.modems.get(&modem_id).map(|modem| {
+                (
+                    modem.outgoing_sms_state.is_ready_to_send(),
+                    modem.outgoing_sms_state.recipient().to_string(),
+                    modem.outgoing_sms_state.text().to_string(),
+                    modem.outgoing_sms_state.check_phone_format(),
+                )
+            })
+        else {
             return Ok(());
         };
 
@@ -586,6 +585,7 @@ impl MqttFrontend {
                 modem_id: modem_id.clone(),
                 recipient,
                 text,
+                check_phone_format,
             },
         )
         .await;
@@ -858,14 +858,7 @@ mod tests {
     #[test]
     fn recipient_input_keeps_only_leading_plus_and_digits() {
         let raw = "+7 (985) 861-9773 доб.42";
-        let mut chars = raw.chars();
-        let has_leading_plus = matches!(chars.next(), Some('+'));
-        let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
-        let sanitized = if has_leading_plus {
-            format!("+{digits}")
-        } else {
-            digits
-        };
+        let sanitized = crate::domain::sanitize_phone_number(raw);
 
         assert_eq!(sanitized, "+7985861977342");
     }
@@ -873,14 +866,7 @@ mod tests {
     #[test]
     fn recipient_input_drops_non_leading_plus() {
         let raw = "7+985+861-97-73";
-        let mut chars = raw.chars();
-        let has_leading_plus = matches!(chars.next(), Some('+'));
-        let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
-        let sanitized = if has_leading_plus {
-            format!("+{digits}")
-        } else {
-            digits
-        };
+        let sanitized = crate::domain::sanitize_phone_number(raw);
 
         assert_eq!(sanitized, "79858619773");
     }

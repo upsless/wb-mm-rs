@@ -21,10 +21,12 @@ Build a focused daemon, not a general-purpose framework. The Python project is
 reference material for behavior, logs, mappings, and edge cases, but its
 architecture should not be copied.
 
-The implemented daemon currently has two long-lived async subsystems plus a
+The implemented daemon currently has three long-lived async subsystems plus a
 shared vocabulary:
 
 - DBus handler: ModemManager discovery, DBus events, and DBus method calls.
+- Core handler: cross-subsystem routing and the future home for policy and
+  command execution.
 - MQTT handler: Wiren Board device/control creation, value publishing, user
   writes, cleanup, and Last Will setup.
 - `src/domain.rs`: shared DBus->MQTT events, MQTT->DBus commands, and the
@@ -32,12 +34,14 @@ shared vocabulary:
 - `src/common.rs`: only small cross-runtime helpers such as
   `wait_for_shutdown()`.
 
-Today MQTT is still the primary lifecycle gate. If MQTT is disconnected, DBus
-work is stopped and runtime state is dropped until MQTT reconnects.
+Today DBus and MQTT already run as independent long-lived lifecycle loops.
+MQTT no longer owns DBus task lifetime; instead, each fresh MQTT session asks
+DBus for a resync so frontend state is rebuilt from a new DBus discovery pass.
 
-That is no longer considered the final architecture. The next major direction
-is to introduce a Core runtime that keeps DBus-side command handling alive even
-while MQTT is down.
+That is still not the final architecture. The next major direction is to
+introduce a Core runtime that keeps DBus-side command handling alive even
+while MQTT is down and becomes the real policy/command owner between DBus and
+MQTT.
 
 ## Standing Decisions
 
@@ -71,14 +75,15 @@ while MQTT is down.
 ## Current Architecture State
 
 - `main.rs` owns the top-level supervisor only:
-  - MQTT is the top-level lifecycle gate;
-  - DBus runs only while MQTT is connected;
-  - MQTT reconnect intervals still live in `main.rs`;
-  - DBus reconnect intervals now live in `src/dbus.rs`;
+  - DBus and MQTT are both started as independent long-lived tasks;
+  - DBus reconnect intervals live in `src/dbus.rs`;
+  - MQTT reconnect intervals live in `src/mqtt.rs`;
   - on DBus session failure, current code maps loss to `ManagerDeleted` until
     the bus returns;
-  - on MQTT loss, DBus is stopped first; after reconnect both subsystems start
-    from a clean slate.
+  - on each fresh MQTT session start, MQTT asks DBus for a resync by
+    restarting the current DBus session;
+  - while MQTT is disconnected, the MQTT lifecycle loop drops queued DBus
+    events instead of preserving a stale backlog.
 - The daemon listens for `SIGINT` and `SIGTERM` and shuts down MQTT and DBus
   loops gracefully.
 - VS Code CodeLLDB note: `Ctrl+C` in the debug terminal is unreliable. The
@@ -111,16 +116,28 @@ while MQTT is down.
     holds DBus-specific mappings, parsers, signal specs, and ids/path helpers;
   - `src/dbus/logstrings.rs` centralizes DBus log targets and message text.
 - MQTT runtime is similarly layered:
-  - `src/mqtt.rs` owns one MQTT session lifecycle;
+  - `src/mqtt.rs` now owns the long-lived MQTT reconnect loop plus
+    session-level resync requests into DBus;
   - `src/mqtt/loop.rs` owns the low-level rumqtt event loop polling;
   - `src/mqtt/frontend.rs` owns MQTT-side DBus event handling, user writes,
-    and direct DBus command emission;
+    and command emission into Core;
   - `src/mqtt/publish.rs` owns retained publish/cleanup helpers and publisher
     state;
   - `src/mqtt/state.rs` owns frontend state.
-- The old `tresher` relay was removed. DBus now emits `DbusEvent` directly into
-  the MQTT session, and MQTT sends `DbusCommand` directly to the currently
-  active DBus session sender.
+- `src/dbus.rs` now owns the long-lived DBus reconnect loop plus explicit
+  resync-triggered session restarts requested by MQTT.
+- `src/core.rs` now exists as the first replacement for the old `tresher`
+  idea:
+  - DBus emits `DbusEvent` into Core;
+  - Core forwards those events into the long-lived MQTT lifecycle;
+  - MQTT sends `DbusCommand` into Core;
+  - Core forwards those commands to the currently active DBus session sender.
+  This Core layer is still intentionally small, but it is no longer purely
+  transparent: it already revalidates outgoing `SendSms` requests and returns
+  a failed outgoing-SMS event to MQTT when such a request should not reach
+  DBus. It also now tracks per-modem incoming SMS inventory membership and
+  automatically requests snapshots for newly observed SMS ids, while still
+  forwarding all SMS-related traffic to MQTT unchanged.
 
 ## Planned Core-Centric Direction
 
@@ -137,6 +154,26 @@ The planned Core layer should own:
 - authorization for outbound SMS/calls;
 - handling of command SMS and future DTMF commands;
 - audit logging for privileged operations.
+
+## Current Core Command Slice
+
+Core now owns the first real inbound SMS command:
+
+- `#help`
+- reply text: `Commands:\n#help [command]`
+
+Current behavior:
+
+- Core recognizes `#help` from incoming SMS snapshots;
+- authorized senders are currently configured with repeated CLI flags:
+  `--command-number <phone>`;
+- Core queues an outbound SMS reply only for authorized senders;
+- Core queues deletion of handled command SMS for both authorized and
+  unauthorized `#help` attempts;
+- with no `--command-number` values, `#help` is effectively disabled because
+  no sender is authorized;
+- Core suppresses `SmsSnapshot` forwarding for handled `#help` traffic, but
+  list/inventory churn may still briefly reach MQTT before deletion lands.
 
 ### Number Lists
 
@@ -201,8 +238,8 @@ degraded mode where:
 
 - `src/domain.rs` now holds the shared DBus/MQTT vocabulary and neutral domain
   types:
-  - `DbusEvent` from DBus into MQTT;
-  - `DbusCommand` from MQTT back into DBus;
+  - `DbusEvent` from DBus into Core and then into MQTT;
+  - `DbusCommand` from MQTT into Core and then into DBus;
 - `src/common.rs` now only keeps shared runtime helpers:
   - `wait_for_shutdown()` used by supervisor, DBus, and MQTT lifecycles.
 - DBus events:
@@ -442,7 +479,8 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - `src/dbus/sms.rs` - SMS inventory watcher, single-SMS watcher, SMS queries,
   and SMS refresh/delete DBus commands.
 - `src/mqtt.rs` - MQTT session lifecycle, frontend startup, graceful stop, DBus
-  event intake, DBus command watch integration, and shutdown handling.
+  event intake from Core, DBus resync requests, graceful stop, and shutdown
+  handling.
 - `src/mqtt/schema.rs` - MQTT device/control schema, topic builders, metadata,
   and payload helpers.
 - `src/mqtt/logstrings.rs` - MQTT log target and MQTT-side log message text.
@@ -451,24 +489,27 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
 - `src/mqtt/loop.rs` - low-level rumqtt event loop polling and incoming
   publish forwarding.
 - `src/mqtt/frontend.rs` - DBus event handling, frontend/business decisions,
-  user write parsing, direct DBus command emission, and state orchestration.
+  user write parsing, command emission into Core, and state orchestration.
+- `src/core.rs` - transparent Core pass-through loop between DBus and MQTT; the
+  future home for whitelist policy and command SMS/DTMF handling.
 - `src/mqtt/publish.rs` - MQTT retained publishing, cleanup, metadata sync, and
   publication-only state.
 - `.agents/skills/modemmanager-mqtt-review/SKILL.md` - local Codex skill.
 
 ## Next Likely Work
 
-1. Sketch the lifecycle refactor from `MQTT -> DBus` toward
-   `Core + DBus -> optional MQTT`:
-   - decide where the new Core runtime lives;
-   - decide how DBus events are routed first into Core and only then into MQTT;
-   - decide how MQTT-originated outbound actions are revalidated by Core.
-2. Define the first persistent TOML model for:
+1. Define the first persistent TOML model for:
    - `command list`;
    - `send list`;
    - `default_command_number`;
    - `default_send_number`;
    - degraded-mode semantics when defaults are absent.
+2. Continue teaching the new Core layer real policy:
+   - start using the new Core-owned incoming SMS snapshots for command
+     recognition/parsing;
+   - decide what must become Core-owned state before business rules land;
+   - extend Core-side validation from current outgoing-SMS format checks toward
+     whitelist-based outbound authorization.
 3. Add the first information-only Core surface before role-management commands:
    - expose send-list facts to MQTT for script visibility;
    - keep command-list facts private to Core;
@@ -532,8 +573,17 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
   channel internally.
 - DBus shutdown now clears active modem watchers via `ManagerWatcher::reset()`
   instead of relying on detached task bookkeeping in the outer loop.
-- The old `tresher` layer is gone. `DbusEvent` now goes straight into the MQTT
-  session, and MQTT writes send `DbusCommand` straight back to the current DBus
-  session sender.
+- The old `tresher` layer is not coming back verbatim, but `src/core.rs` is now
+  the new architectural seam for that class of work:
+  - DBus emits `DbusEvent` into Core;
+  - Core forwards into MQTT;
+  - MQTT emits `DbusCommand` back into Core;
+  - Core forwards to the currently active DBus session sender.
+  At the moment it is still a small pass-through-oriented layer, not yet a full
+  policy engine, but outgoing SMS revalidation has already moved there.
+- SMS inventory timestamp caching intentionally remains in `src/dbus/sms.rs`:
+  it is still coupled directly to the modem `Messages` property stream and the
+  local DBus-side cache, so moving it into Core now would add another
+  request/response seam without reducing complexity.
 - `wait_for_shutdown()` now lives in `src/common.rs` and is shared by main,
   MQTT, and DBus lifecycle code.

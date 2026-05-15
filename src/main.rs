@@ -1,5 +1,6 @@
 mod cli;
 mod common;
+mod core;
 mod dbus;
 mod domain;
 mod mqtt;
@@ -9,14 +10,13 @@ use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::time::{Duration, sleep};
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
 use crate::common::{
-    DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
-    MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+    CORE_COMMAND_CHANNEL_CAPACITY, CORE_EVENT_CHANNEL_CAPACITY, DBUS_EVENT_CHANNEL_CAPACITY,
+    wait_for_shutdown,
 };
 use crate::domain::DbusCommand;
 
@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let mut supervisor_task = tokio::spawn(run_supervisor(
         cli.dbus_address.clone(),
         cli.mqtt_address.clone(),
+        cli.command_numbers.clone(),
         shutdown_rx,
     ));
 
@@ -81,61 +82,62 @@ async fn main() -> Result<()> {
 async fn run_supervisor(
     dbus_address: Option<String>,
     mqtt_address: Option<String>,
+    command_numbers: Vec<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut mqtt_retry_attempt = 1;
+    let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
+    let (core_event_tx, core_event_rx) = mpsc::channel(CORE_EVENT_CHANNEL_CAPACITY);
+    let (core_command_tx, core_command_rx) = mpsc::channel(CORE_COMMAND_CHANNEL_CAPACITY);
+    let (actual_dbus_command_tx, actual_dbus_command_rx) =
+        watch::channel(None::<mpsc::Sender<DbusCommand>>);
+    let (dbus_resync_tx, dbus_resync_rx) = watch::channel(0u64);
 
-    loop {
-        if *shutdown_rx.borrow() {
-            return Ok(());
+    let mut dbus_task = tokio::spawn(dbus::run_lifecycle(
+        dbus_address.clone(),
+        shutdown_rx.clone(),
+        dbus_event_tx,
+        actual_dbus_command_tx,
+        dbus_resync_rx,
+    ));
+    let mut core_task = tokio::spawn(core::run_lifecycle(
+        core::CoreConfig::new(command_numbers),
+        shutdown_rx.clone(),
+        dbus_event_rx,
+        core_event_tx,
+        core_command_rx,
+        actual_dbus_command_rx,
+    ));
+    let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
+        mqtt_address.clone(),
+        shutdown_rx.clone(),
+        core_event_rx,
+        core_command_tx,
+        dbus_resync_tx,
+    ));
+
+    tokio::select! {
+        result = wait_for_shutdown(&mut shutdown_rx) => {
+            result?;
         }
-
-        let (dbus_event_tx, dbus_event_rx) = mpsc::channel(DBUS_EVENT_CHANNEL_CAPACITY);
-        let (actual_dbus_command_tx, actual_dbus_command_rx) =
-            watch::channel(None::<mpsc::Sender<DbusCommand>>);
-        let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
-        let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
-            mqtt_address.clone(),
-            mqtt_stop_rx.clone(),
-            dbus_event_rx,
-            actual_dbus_command_rx,
-        ));
-
-        match dbus::run_lifecycle(
-            dbus_address.clone(),
-            &mut shutdown_rx,
-            &mqtt_stop_tx,
-            &mut mqtt_task,
-            dbus_event_tx,
-            &actual_dbus_command_tx,
-        )
-        .await?
-        {
-            dbus::LifecycleExit::Shutdown => {
-                stop_child_task("MQTT", mqtt_stop_tx, mqtt_task).await?;
-                return Ok(());
-            }
-            dbus::LifecycleExit::MqttEnded => {
-                let delay = reconnect_delay(
-                    mqtt_retry_attempt,
-                    MQTT_RECONNECT_FAST_INTERVAL,
-                    MQTT_RECONNECT_SLOW_INTERVAL,
-                    MQTT_RECONNECT_FAST_ATTEMPTS,
-                );
-                info!(
-                    target: LOG_TARGET,
-                    "MQTT connection lost, retrying in {} second(s) (attempt {}).",
-                    delay.as_secs(),
-                    mqtt_retry_attempt
-                );
-                mqtt_retry_attempt += 1;
-
-                if sleep_until_retry_or_shutdown(delay, &mut shutdown_rx).await? {
-                    return Ok(());
-                }
-            }
+        dbus_result = &mut dbus_task => {
+            task_result("DBus", dbus_result)?;
+            return Err(anyhow::anyhow!("DBus lifecycle exited before shutdown"));
+        }
+        core_result = &mut core_task => {
+            task_result("Core", core_result)?;
+            return Err(anyhow::anyhow!("Core lifecycle exited before shutdown"));
+        }
+        mqtt_result = &mut mqtt_task => {
+            task_result("MQTT", mqtt_result)?;
+            return Err(anyhow::anyhow!("MQTT lifecycle exited before shutdown"));
         }
     }
+
+    task_result("DBus", dbus_task.await)?;
+    task_result("Core", core_task.await)?;
+    task_result("MQTT", mqtt_task.await)?;
+
+    Ok(())
 }
 
 /// Converts a task result into an `anyhow::Result` with the task name in the
@@ -147,55 +149,6 @@ fn task_result(
     result
         .with_context(|| format!("{name} task join failed"))?
         .with_context(|| format!("{name} task failed"))
-}
-
-async fn stop_child_task(
-    name: &str,
-    stop_tx: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<Result<()>>,
-) -> Result<()> {
-    let _ = stop_tx.send(true);
-    stop_finished_or_stopping_task(name, task).await
-}
-
-async fn stop_finished_or_stopping_task(
-    name: &str,
-    task: tokio::task::JoinHandle<Result<()>>,
-) -> Result<()> {
-    match task.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => {
-            error!(target: LOG_TARGET, "{name} loop ended while stopping: {err:#}");
-            Ok(())
-        }
-        Err(join_error) => Err(anyhow::anyhow!("{name} task join failed: {join_error}")),
-    }
-}
-
-fn reconnect_delay(
-    attempt: u32,
-    fast_interval: Duration,
-    slow_interval: Duration,
-    fast_attempts: u32,
-) -> Duration {
-    if attempt <= fast_attempts {
-        fast_interval
-    } else {
-        slow_interval
-    }
-}
-
-async fn sleep_until_retry_or_shutdown(
-    delay: Duration,
-    shutdown_rx: &mut watch::Receiver<bool>,
-) -> Result<bool> {
-    tokio::select! {
-        result = wait_for_shutdown(shutdown_rx) => {
-            result?;
-            Ok(true)
-        }
-        _ = sleep(delay) => Ok(false),
-    }
 }
 
 /// Initializes tracing from `RUST_LOG` and suppresses noisy rumqttc state logs

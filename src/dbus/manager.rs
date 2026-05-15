@@ -261,6 +261,7 @@ impl ManagerWatcher {
                 modem_id,
                 recipient,
                 text,
+                ..
             } => {
                 let sending_info = OutgoingSmsInfo {
                     recipient: recipient.clone(),
