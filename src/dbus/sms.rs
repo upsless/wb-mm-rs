@@ -173,9 +173,24 @@ impl SmsInventoryWorker {
                         .get()
                         .await
                         .context("failed to read modem Messages property change")?;
-                    let entries = self
+                    let old_sms_count = inventory_cache.len();
+                    let (entries, added_sms_ids, removed_sms_ids) = self
                         .update_inventory_cache_from_paths(&message_paths, &mut inventory_cache)
                         .await?;
+                    let new_sms_count = inventory_cache.len();
+                    if !added_sms_ids.is_empty() || !removed_sms_ids.is_empty() {
+                        info!(
+                            target: logstrings::LOG_TARGET,
+                            "{}",
+                            logstrings::sms_inventory_changed_message(
+                                &self.modem_id,
+                                old_sms_count,
+                                new_sms_count,
+                                &added_sms_ids,
+                                &removed_sms_ids,
+                            )
+                        );
+                    }
                     sms_watcher
                         .sync_inventory(&self.event_tx, &self.modem_id, entries)
                         .await?;
@@ -199,7 +214,7 @@ impl SmsInventoryWorker {
             .context("failed to read modem Messages property")?;
 
         let mut inventory_cache = HashMap::new();
-        let entries = self
+        let (entries, _, _) = self
             .update_inventory_cache_from_paths(&message_paths, &mut inventory_cache)
             .await?;
         Ok((inventory_cache, entries))
@@ -209,13 +224,26 @@ impl SmsInventoryWorker {
         &self,
         message_paths: &[OwnedObjectPath],
         inventory_cache: &mut HashMap<schema::SmsId, SmsInventoryEntry>,
-    ) -> Result<Vec<SmsInventoryEntry>> {
+    ) -> Result<(
+        Vec<SmsInventoryEntry>,
+        Vec<schema::SmsId>,
+        Vec<schema::SmsId>,
+    )> {
         let sms_ids: Vec<_> = message_paths
             .iter()
             .filter_map(|path| schema::sms_id_from_path(path.as_str()))
             .collect();
 
+        let previous_sms_ids: HashSet<_> = inventory_cache.keys().cloned().collect();
         let current_sms_ids: HashSet<_> = sms_ids.iter().cloned().collect();
+        let removed_sms_ids = previous_sms_ids
+            .difference(&current_sms_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_sms_ids = current_sms_ids
+            .difference(&previous_sms_ids)
+            .cloned()
+            .collect::<Vec<_>>();
         inventory_cache.retain(|sms_id, _| current_sms_ids.contains(sms_id));
 
         for sms_id in &sms_ids {
@@ -229,10 +257,11 @@ impl SmsInventoryWorker {
             inventory_cache.insert(sms_id.clone(), entry);
         }
 
-        Ok(sms_ids
+        let entries = sms_ids
             .iter()
             .filter_map(|sms_id| inventory_cache.get(sms_id).cloned())
-            .collect())
+            .collect();
+        Ok((entries, added_sms_ids, removed_sms_ids))
     }
 }
 

@@ -47,6 +47,21 @@ pub fn sms_inventory_snapshot_message(modem_id: &ModemId, sms_count: usize) -> S
     format!("Modem {} SMS inventory: sms_count={sms_count}", modem_id.0)
 }
 
+pub fn sms_inventory_changed_message(
+    modem_id: &ModemId,
+    old_sms_count: usize,
+    new_sms_count: usize,
+    added_sms_ids: &[SmsId],
+    removed_sms_ids: &[SmsId],
+) -> String {
+    let added = format_sms_id_list(added_sms_ids);
+    let removed = format_sms_id_list(removed_sms_ids);
+    format!(
+        "Modem {} SMS inventory changed: sms_count={old_sms_count}->{new_sms_count} added={added} removed={removed}",
+        modem_id.0
+    )
+}
+
 pub fn sms_property_changed_message(modem_id: &ModemId, update: &SmsUpdate) -> String {
     format!(
         "Modem {} SMS {} changed: {}",
@@ -70,4 +85,13 @@ pub fn outgoing_sms_update_message(modem_id: &ModemId, info: &OutgoingSmsInfo) -
 
 pub fn sms_signal_stream_closed_message(signal_id: &str, object_path: &str) -> String {
     format!("Signal stream closed: {signal_id} ({object_path})")
+}
+
+fn format_sms_id_list(sms_ids: &[SmsId]) -> String {
+    let ids = sms_ids
+        .iter()
+        .map(|sms_id| format!("#{}", sms_id.0))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{ids}]")
 }
