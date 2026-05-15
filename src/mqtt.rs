@@ -7,11 +7,12 @@ mod state;
 
 use anyhow::{Context, Result, bail};
 use rumqttc::{AsyncClient, LastWill, MqttOptions, QoS, Transport};
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::common::{
-    MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
+    AppConfig, MQTT_INCOMING_CHANNEL_CAPACITY, MQTT_REQUEST_QUEUE_CAPACITY, wait_for_shutdown,
 };
 use crate::domain::{DbusCommand, DbusEvent};
 use crate::mqtt::frontend::MqttFrontend;
@@ -23,14 +24,14 @@ const MQTT_CLIENT_ID_PREFIX: &str = "wb-mm-mqtt";
 const MQTT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub async fn run_lifecycle(
-    mqtt_address: Option<String>,
+    config: Arc<AppConfig>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut dbus_event_rx: mpsc::Receiver<DbusEvent>,
     mut dbus_command_rx: watch::Receiver<Option<mpsc::Sender<DbusCommand>>>,
 ) -> Result<()> {
-    let mqtt_options = build_mqtt_options(mqtt_address.as_deref())?;
+    let mqtt_options = build_mqtt_options(config.mqtt_address())?;
     let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
-    let mut frontend = MqttFrontend::new(client.clone());
+    let mut frontend = MqttFrontend::new(client.clone(), config.allow_outgoing_sms);
     let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
     let (incoming_publish_tx, mut incoming_publish_rx) =
         mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);

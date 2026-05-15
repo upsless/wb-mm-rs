@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::debug;
 use zbus::{
@@ -11,6 +12,7 @@ use zbus::{
 
 use super::logstrings;
 use super::manager::{ManagerPresence, ManagerWatcher};
+use crate::common::AppConfig;
 use crate::dbus::schema;
 use crate::domain::DbusEvent;
 
@@ -33,6 +35,7 @@ impl DbusRuntime {
     pub(super) async fn new(
         connection: Connection,
         event_tx: mpsc::Sender<DbusEvent>,
+        config: Arc<AppConfig>,
     ) -> Result<Self> {
         let dbus_proxy = DBusProxy::new(&connection)
             .await
@@ -44,7 +47,7 @@ impl DbusRuntime {
         let manager_presence = query_manager_presence(&dbus_proxy).await?;
         emit_manager_presence(&event_tx, manager_presence).await;
 
-        let mut modem_manager = ManagerWatcher::new(manager_presence);
+        let mut modem_manager = ManagerWatcher::new(manager_presence, config);
         modem_manager.activate(&connection, &event_tx).await?;
 
         Ok(Self {

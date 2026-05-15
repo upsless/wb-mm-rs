@@ -1,6 +1,6 @@
 # Project Agent Notes
 
-This repository is the clean starting point for a Rust daemon for Wiren Board
+This repository is the clean starting point for a Rust daemon for WirenBoard
 ModemManager integration.
 
 ## Operating Rules
@@ -40,8 +40,8 @@ ModemManager integration.
   language.
 - After Rust code edits, run `cargo fmt --check`, `cargo clippy`, and
   `cargo test` where applicable.
-- Do not change the Wiren Board MQTT topic schema unless explicitly requested.
-- For new MQTT devices and controls, use current Wiren Board naming style:
+- Do not change the WirenBoard MQTT topic schema unless explicitly requested.
+- For new MQTT devices and controls, use current WirenBoard naming style:
   lowercase words separated by underscores. Do not copy old CamelCase control
   names or hyphenated device names from `wb-mm-mqtt` unless compatibility is
   explicitly required.
@@ -68,7 +68,7 @@ ModemManager integration.
 
 ## Development Target
 
-- Test Wiren Board host: `wb.loc`.
+- Test WirenBoard host: `wb.loc`.
 - Development machines can access DBus and MQTT on `wb.loc` directly.
 - Project state is synchronized through GitHub, not a shared VM.
 
@@ -78,7 +78,7 @@ The intended daemon has three async parts:
 
 - DBus backend: initial discovery, DBus event handling, ModemManager method
   calls.
-- Wiren Board MQTT frontend: device/control creation, initial value publishing,
+- WirenBoard MQTT frontend: device/control creation, initial value publishing,
   user control change observation, and cleanup on shutdown.
 - Tresher/business logic: receives events, owns high-level state decisions,
   and sends commands to DBus or MQTT handlers.
@@ -86,7 +86,7 @@ The intended daemon has three async parts:
 Important reference behavior: the old project uses MQTT Last Will to force the
 ModemManager availability control into an unavailable state when the daemon
 dies. Keep this behavior in the new design, even if the exact topic/payload is
-reworked to better fit current Wiren Board conventions.
+reworked to better fit current WirenBoard conventions.
 
 Reference mappings from the old project should be captured as compact
 configuration or mapping files, similar in spirit to `mqtt_logics.py` and

@@ -3,7 +3,7 @@
 ## Machines
 
 Development happens on the laptop and desktop directly. A separate shared VM is
-not required because both machines can reach the test Wiren Board host.
+not required because both machines can reach the test WirenBoard host.
 
 ## Test Target
 

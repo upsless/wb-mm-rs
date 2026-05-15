@@ -14,6 +14,7 @@ use zbus::{
 
 use super::connection::emit_event;
 use super::logstrings;
+use crate::common::AppConfig;
 use crate::dbus::schema;
 use crate::domain::{DbusEvent, SmsInventoryEntry};
 
@@ -679,7 +680,12 @@ pub(super) async fn send_sms(
     modem_id: &schema::ModemId,
     recipient: &str,
     text: &str,
+    config: &AppConfig,
 ) -> Result<()> {
+    if !config.allow_outgoing_sms {
+        anyhow::bail!("SMS sending is not allowed by configuration");
+    }
+
     let modem_path = schema::modem_path_from_id(modem_id);
     let messaging_proxy: Proxy<'_> = ProxyBuilder::new(connection)
         .destination(schema::MM_BUS_NAME)

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -14,9 +15,10 @@ use super::connection::emit_event;
 use super::logstrings;
 use super::modem::ModemWatcher;
 use super::sms::{delete_sms, query_sms_snapshot, send_sms};
+use crate::common::AppConfig;
 use crate::dbus::schema;
 use crate::domain::{DbusCommand, DbusEvent, OutgoingSmsInfo, OutgoingSmsStatus};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
 #[derive(Default)]
 struct ManagerState {
@@ -78,6 +80,7 @@ impl ManagerStreams {
 
 pub(super) struct ManagerWatcher {
     pub(super) presence: ManagerPresence,
+    config: Arc<AppConfig>,
     state: ManagerState,
     pub(super) streams: ManagerStreams,
 }
@@ -106,9 +109,10 @@ pub(super) enum LoopFlow {
 }
 
 impl ManagerWatcher {
-    pub(super) fn new(presence: ManagerPresence) -> Self {
+    pub(super) fn new(presence: ManagerPresence, config: Arc<AppConfig>) -> Self {
         Self {
             presence,
+            config,
             state: ManagerState::default(),
             streams: ManagerStreams::default(),
         }
@@ -283,12 +287,20 @@ impl ManagerWatcher {
                 )
                 .await;
 
-                match send_sms(connection, &modem_id, &recipient, &text).await {
+                match send_sms(
+                    connection,
+                    &modem_id,
+                    &recipient,
+                    &text,
+                    self.config.as_ref(),
+                )
+                .await
+                {
                     Ok(()) => {
                         let sent_info = OutgoingSmsInfo {
                             recipient,
                             text,
-                            timestamp: Some(OffsetDateTime::now_utc()),
+                            timestamp: Some(local_now()),
                             status: OutgoingSmsStatus::Sent,
                             error: None,
                         };
@@ -386,6 +398,14 @@ fn outgoing_sms_error_text(err: &anyhow::Error) -> String {
         .rsplit_once(": ")
         .map(|(_, reason)| reason.to_string())
         .unwrap_or(message)
+}
+
+fn local_now() -> OffsetDateTime {
+    let now = OffsetDateTime::now_utc();
+    match UtcOffset::current_local_offset() {
+        Ok(offset) => now.to_offset(offset),
+        Err(_) => now,
+    }
 }
 
 /// Counts objects that implement the ModemManager Modem interface.

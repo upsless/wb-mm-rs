@@ -1,5 +1,18 @@
 use time::OffsetDateTime;
 
+pub fn sanitize_phone_number(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let has_leading_plus = matches!(chars.next(), Some('+'));
+    let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
+
+    if has_leading_plus {
+        format!("+{digits}")
+    } else {
+        digits
+    }
+}
+
 fn format_option_string(value: Option<&str>) -> String {
     value.unwrap_or("None").to_string()
 }

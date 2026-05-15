@@ -2,8 +2,8 @@
 
 ## Goal
 
-Build a specialized Rust daemon for Wiren Board devices that integrates
-ModemManager with the standard Wiren Board MQTT device/control model.
+Build a specialized Rust daemon for WirenBoard devices that integrates
+ModemManager with the standard WirenBoard MQTT device/control model.
 
 The daemon should cover the practical use case:
 
@@ -65,13 +65,13 @@ the behavior boundary is clearer.
 
 ### MQTT Handler
 
-- Creates Wiren Board devices and controls.
+- Creates WirenBoard devices and controls.
 - Publishes initial metadata and values.
 - Applies DBus events to the frontend projection and publishes the result.
 - Observes user writes to writable controls.
 - Emits DBus commands directly to the current DBus session sender.
 - Removes or marks generated entities on daemon shutdown, according to the
-  chosen Wiren Board behavior.
+  chosen WirenBoard behavior.
 - Sets MQTT Last Will so that an unexpected daemon stop marks ModemManager as
   unavailable in the UI/control model.
 
@@ -93,7 +93,10 @@ incoming SMS picker model:
 
 - MQTT exposes per-modem compose controls (`outgoing_sms_recipient`,
   `outgoing_sms_text`, `send_sms`) and readonly "last sent" controls above the
-  incoming SMS controls;
+  incoming SMS controls only when the daemon is started with
+  `--allow-outgoing-sms`;
+- without `--allow-outgoing-sms`, outgoing SMS controls are not created at all
+  and outgoing SMS status events are not projected into MQTT;
 - DBus executes `Create` + `Send` on the modem messaging interface and emits
   outgoing SMS status updates back into MQTT;
 - the first implementation treats outgoing SMS as a separate action/result
@@ -369,7 +372,7 @@ should be chosen deliberately:
 - keep the UI-visible availability signal obvious;
 - avoid leaving stale "available" state after daemon death;
 - consider also publishing conventional `/meta/error` state if it helps
-  consumers that follow Wiren Board conventions strictly.
+  consumers that follow WirenBoard conventions strictly.
 
 ## Mapping Files
 
@@ -419,7 +422,7 @@ not produce chatty traces, while development can enable full trace/debug output.
 
 ## MQTT Naming
 
-Use current Wiren Board naming conventions for new topics:
+Use current WirenBoard naming conventions for new topics:
 
 - device and control topic names should be lowercase;
 - separate words with underscores;

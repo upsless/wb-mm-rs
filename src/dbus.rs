@@ -7,13 +7,14 @@ mod schema;
 mod sms;
 
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
 use crate::common::{
-    DBUS_COMMAND_CHANNEL_CAPACITY, DBUS_RECONNECT_FAST_ATTEMPTS, DBUS_RECONNECT_FAST_INTERVAL,
-    DBUS_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+    AppConfig, DBUS_COMMAND_CHANNEL_CAPACITY, DBUS_RECONNECT_FAST_ATTEMPTS,
+    DBUS_RECONNECT_FAST_INTERVAL, DBUS_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
 };
 use crate::domain::{DbusCommand, DbusEvent};
 
@@ -34,7 +35,7 @@ pub enum LifecycleExit {
 /// `LifecycleExit::MqttEnded` when the MQTT task terminates and the DBus
 /// session should be torn down.
 pub async fn run_lifecycle(
-    dbus_address: Option<String>,
+    config: Arc<AppConfig>,
     shutdown_rx: &mut watch::Receiver<bool>,
     mqtt_stop_tx: &watch::Sender<bool>,
     mqtt_task: &mut tokio::task::JoinHandle<Result<()>>,
@@ -48,7 +49,7 @@ pub async fn run_lifecycle(
         let _ = command_tx.send(Some(dbus_command_tx));
         let (dbus_stop_tx, dbus_stop_rx) = watch::channel(false);
         let mut dbus_task = tokio::spawn(connection::run(
-            dbus_address.clone(),
+            config.clone(),
             dbus_stop_rx,
             dbus_command_rx,
             event_tx.clone(),

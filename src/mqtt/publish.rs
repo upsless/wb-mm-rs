@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, QoS};
 use std::collections::HashSet;
 use time::OffsetDateTime;
-use tracing::info;
+use tracing::debug;
 
 use crate::dbus::{
     ManagerStatus, ModemId, ModemInfo, ModemUpdate, SmsPropertyChange, SmsSnapshot, SmsUpdate,
@@ -25,6 +25,7 @@ pub(super) struct WbSwitch(bool);
 pub(super) struct MqttPublisher {
     client: AsyncClient,
     state: MqttPublishState,
+    allow_outgoing_sms: bool,
 }
 
 #[derive(Default)]
@@ -114,10 +115,11 @@ where
 }
 
 impl MqttPublisher {
-    pub(super) fn new(client: AsyncClient) -> Self {
+    pub(super) fn new(client: AsyncClient, allow_outgoing_sms: bool) -> Self {
         Self {
             client,
             state: MqttPublishState::default(),
+            allow_outgoing_sms,
         }
     }
 
@@ -176,7 +178,7 @@ impl MqttPublisher {
         )
         .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "Update main device manager data: version={version} modem_count={modem_count}"
         );
@@ -201,12 +203,12 @@ impl MqttPublisher {
         )
         .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_mm_availability_message(is_available.as_str())
         );
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "Update main device manager status: status={manager_status}"
         );
@@ -218,7 +220,7 @@ impl MqttPublisher {
         self.publish_control(schema::MM_DEVICE_NAME, schema::MM_CONTROL_VERSION, version)
             .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_mm_version_message(version)
@@ -235,7 +237,7 @@ impl MqttPublisher {
         )
         .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_mm_modem_count_message(modem_count)
@@ -288,20 +290,28 @@ impl MqttPublisher {
         }
 
         self.subscribe_to_modem_sms_controls(modem_index).await?;
+        if !self.allow_outgoing_sms {
+            let device_name = schema::device_name_for_modem(modem_index);
+            for spec in schema::modem_outgoing_sms_control_specs() {
+                self.cleanup_control(&device_name, spec).await?;
+            }
+        }
         self.publish_modem_sms_structure(modem_index).await?;
 
         let device_name = schema::device_name_for_modem(modem_index);
-        self.publish_last_sent_sms(modem_index, None).await?;
-        self.publish_outgoing_sms_draft(&device_name, "", "")
+        if self.allow_outgoing_sms {
+            self.publish_last_sent_sms(modem_index, None).await?;
+            self.publish_outgoing_sms_draft(&device_name, "", "")
+                .await?;
+            self.publish_control(
+                &device_name,
+                schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
+                switch_payload(true),
+            )
             .await?;
-        self.publish_control(
-            &device_name,
-            schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
-            switch_payload(true),
-        )
-        .await?;
-        self.publish_control(&device_name, schema::MODEM_CONTROL_SEND_SMS, "0")
-            .await?;
+            self.publish_control(&device_name, schema::MODEM_CONTROL_SEND_SMS, "0")
+                .await?;
+        }
         self.publish_control(
             &device_name,
             schema::MODEM_CONTROL_DISPLAYED_SMS_INDEX,
@@ -336,11 +346,21 @@ impl MqttPublisher {
         }
 
         let device_name = schema::device_name_for_modem(modem_index);
+        if self.allow_outgoing_sms {
+            for control_name in [
+                schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
+                schema::MODEM_CONTROL_OUTGOING_SMS_TEXT,
+                schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
+                schema::MODEM_CONTROL_SEND_SMS,
+            ] {
+                let topic = schema::control_on_topic(&device_name, control_name);
+                self.client
+                    .subscribe(topic.clone(), QoS::AtMostOnce)
+                    .await
+                    .with_context(|| format!("failed to subscribe to MQTT topic `{topic}`"))?;
+            }
+        }
         for control_name in [
-            schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
-            schema::MODEM_CONTROL_OUTGOING_SMS_TEXT,
-            schema::MODEM_CONTROL_CHECK_PHONE_FORMAT,
-            schema::MODEM_CONTROL_SEND_SMS,
             schema::MODEM_CONTROL_MESSAGE_SELECT,
             schema::MODEM_CONTROL_DELETE_MESSAGE,
         ] {
@@ -391,8 +411,10 @@ impl MqttPublisher {
 
     async fn publish_modem_sms_structure(&self, modem_index: u32) -> Result<()> {
         let device_name = schema::device_name_for_modem(modem_index);
-        for spec in schema::modem_outgoing_sms_control_specs() {
-            self.publish_control_metadata(&device_name, spec).await?;
+        if self.allow_outgoing_sms {
+            for spec in schema::modem_outgoing_sms_control_specs() {
+                self.publish_control_metadata(&device_name, spec).await?;
+            }
         }
         for spec in schema::modem_sms_control_specs() {
             self.publish_control_metadata(&device_name, spec).await?;
@@ -458,7 +480,7 @@ impl MqttPublisher {
         )
         .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_modem_snapshot_message(
@@ -526,7 +548,7 @@ impl MqttPublisher {
             }
         }
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_modem_update_message(
@@ -578,6 +600,10 @@ impl MqttPublisher {
         outgoing_sms: &MqttOutgoingSmsState,
         send_allowed: bool,
     ) -> Result<()> {
+        if !self.allow_outgoing_sms {
+            return Ok(());
+        }
+
         self.ensure_modem_sms_controls(modem_id, modem_index)
             .await?;
 
@@ -691,7 +717,7 @@ impl MqttPublisher {
         self.publish_control(&device_name, schema::MODEM_CONTROL_SMS_COUNT, sms_count)
             .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_modem_sms_count_message(modem_index, &modem_id.0, sms_count)
@@ -708,7 +734,7 @@ impl MqttPublisher {
         )
         .await?;
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_mm_sms_count_message(sms_count)
@@ -744,7 +770,7 @@ impl MqttPublisher {
             }
         }
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_message_select_control_message(
@@ -877,7 +903,7 @@ impl MqttPublisher {
             }
         }
 
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_publish_picked_sms_message(

@@ -6,6 +6,7 @@ mod mqtt;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -15,8 +16,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::Cli;
 use crate::common::{
-    DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
-    MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
+    AppConfig, DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS,
+    MQTT_RECONNECT_FAST_INTERVAL, MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
 };
 use crate::domain::DbusCommand;
 
@@ -24,9 +25,8 @@ const LOG_TARGET: &str = "MAIN";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging()?;
-
-    let cli = Cli::parse();
+    let config = Arc::new(AppConfig::from(Cli::parse()));
+    init_logging(config.log_level())?;
 
     info!(target: LOG_TARGET, "Starting wb-mm-mqtt");
 
@@ -41,11 +41,7 @@ async fn main() -> Result<()> {
         signal(SignalKind::interrupt()).context("failed to register SIGINT handler")?;
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
-    let mut supervisor_task = tokio::spawn(run_supervisor(
-        cli.dbus_address.clone(),
-        cli.mqtt_address.clone(),
-        shutdown_rx,
-    ));
+    let mut supervisor_task = tokio::spawn(run_supervisor(config, shutdown_rx));
 
     // `tokio::select!` waits for whichever async branch completes first.
     // In our case that is either:
@@ -79,8 +75,7 @@ async fn main() -> Result<()> {
 /// Starts MQTT and DBus sessions and restarts them according to the configured
 /// reconnect intervals.
 async fn run_supervisor(
-    dbus_address: Option<String>,
-    mqtt_address: Option<String>,
+    config: Arc<AppConfig>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut mqtt_retry_attempt = 1;
@@ -95,14 +90,14 @@ async fn run_supervisor(
             watch::channel(None::<mpsc::Sender<DbusCommand>>);
         let (mqtt_stop_tx, mqtt_stop_rx) = watch::channel(false);
         let mut mqtt_task = tokio::spawn(mqtt::run_lifecycle(
-            mqtt_address.clone(),
+            config.clone(),
             mqtt_stop_rx.clone(),
             dbus_event_rx,
             actual_dbus_command_rx,
         ));
 
         match dbus::run_lifecycle(
-            dbus_address.clone(),
+            config.clone(),
             &mut shutdown_rx,
             &mqtt_stop_tx,
             &mut mqtt_task,
@@ -198,10 +193,13 @@ async fn sleep_until_retry_or_shutdown(
     }
 }
 
-/// Initializes tracing from `RUST_LOG` and suppresses noisy rumqttc state logs
-/// unless that target is explicitly requested.
-fn init_logging() -> Result<()> {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+/// Initializes tracing from `--log-level` or `RUST_LOG` and suppresses noisy
+/// rumqttc state logs unless that target is explicitly requested.
+fn init_logging(log_level: Option<&str>) -> Result<()> {
+    let filter = log_level
+        .map(str::to_owned)
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .unwrap_or_else(|| "info".to_string());
     let filter = if filter.contains("rumqttc::state") {
         filter
     } else {

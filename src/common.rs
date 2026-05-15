@@ -2,6 +2,30 @@ use anyhow::Result;
 use tokio::sync::watch;
 use tokio::time::Duration;
 
+/// Static application settings collected from CLI flags and shared across
+/// long-lived runtime components.
+#[derive(Debug, Clone, Default)]
+pub struct AppConfig {
+    pub dbus_address: Option<String>,
+    pub mqtt_address: Option<String>,
+    pub allow_outgoing_sms: bool,
+    pub log_level: Option<String>,
+}
+
+impl AppConfig {
+    pub fn dbus_address(&self) -> Option<&str> {
+        self.dbus_address.as_deref()
+    }
+
+    pub fn mqtt_address(&self) -> Option<&str> {
+        self.mqtt_address.as_deref()
+    }
+
+    pub fn log_level(&self) -> Option<&str> {
+        self.log_level.as_deref()
+    }
+}
+
 /// Fast reconnect delay for the top-level MQTT supervisor loop.
 pub const MQTT_RECONNECT_FAST_INTERVAL: Duration = Duration::from_secs(5);
 /// Slow reconnect delay after repeated MQTT failures.

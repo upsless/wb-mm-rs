@@ -6,13 +6,13 @@ starting a new Codex chat.
 ## Project
 
 - Repository: `upsless/wb-mm-rs`
-- Purpose: focused Rust daemon for Wiren Board ModemManager integration.
+- Purpose: focused Rust daemon for WirenBoard ModemManager integration.
 - Reference fork available to the GitHub connector: `upsless/wb-mm-mqtt`.
 - Upstream reference: `AbyssDiggers/wb-mm-mqtt`.
 - Test target: `wb.loc`; development machines can reach MQTT and DBus there.
 - Canonical MQTT conventions reference:
   `https://github.com/wirenboard/conventions/blob/main/README.md`
-- Wiren Board MQTT wiki reference:
+- WirenBoard MQTT wiki reference:
   `https://wiki.wirenboard.com/wiki/MQTT`
 
 ## Direction
@@ -25,7 +25,7 @@ The implemented daemon currently has two long-lived async subsystems plus a
 shared vocabulary:
 
 - DBus handler: ModemManager discovery, DBus events, and DBus method calls.
-- MQTT handler: Wiren Board device/control creation, value publishing, user
+- MQTT handler: WirenBoard device/control creation, value publishing, user
   writes, cleanup, and Last Will setup.
 - `src/domain.rs`: shared DBus->MQTT events, MQTT->DBus commands, and the
   neutral domain types used by both subsystems.
@@ -56,7 +56,7 @@ while MQTT is down.
   `is_available` control is the user-facing trust marker and must become `0`
   when the daemon dies unexpectedly or when DBus says ModemManager is inactive
   or deleted.
-- Use current Wiren Board naming style for new topics: lowercase words
+- Use current WirenBoard naming style for new topics: lowercase words
   separated by underscores. Do not copy old names such as `IsAvailable`,
   `ModemsCount`, `SignalQuality`, or `mm-modem-1` unless compatibility is
   explicitly required.
@@ -472,9 +472,13 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
    visible control, or whether it should later be complemented by a visible
    "Last Received SMS Date" plus hidden unix-time control.
 7. Validate and polish the new modem-level outgoing SMS flow on real hardware:
-   - per modem, writable compose controls now exist for recipient and text plus
-     a `send_sms` trigger button;
-   - readonly result controls now show `last_sent_sms_status`,
+   - all outgoing SMS controls now exist only when the daemon is started with
+     `--allow-outgoing-sms`;
+   - without that flag, outgoing controls are not created at all and
+     `OutgoingSmsUpdated` does not reach MQTT;
+   - with the flag, per modem writable compose controls exist for recipient
+     and text plus a `send_sms` trigger button;
+   - readonly result controls then show `last_sent_sms_status`,
      `last_sent_sms_timestamp`, hidden unix-time, `last_sent_sms_recipient`,
      and a one-line `last_sent_sms_text`;
    - outgoing SMS handling is still intentionally separate from the current

@@ -3,7 +3,7 @@ use rumqttc::{AsyncClient, Publish};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::common::MQTT_GRACEFUL_CLEANUP_FLUSH_DELAY;
 use crate::dbus::{
@@ -19,13 +19,15 @@ use crate::mqtt::state::{MqttModemSmsState, MqttSessionState, max_message_select
 pub(super) struct MqttFrontend {
     publisher: MqttPublisher,
     pub(super) state: MqttSessionState,
+    allow_outgoing_sms: bool,
 }
 
 impl MqttFrontend {
-    pub(super) fn new(client: AsyncClient) -> Self {
+    pub(super) fn new(client: AsyncClient, allow_outgoing_sms: bool) -> Self {
         Self {
-            publisher: MqttPublisher::new(client),
+            publisher: MqttPublisher::new(client, allow_outgoing_sms),
             state: MqttSessionState::default(),
+            allow_outgoing_sms,
         }
     }
 
@@ -88,7 +90,9 @@ impl MqttFrontend {
                     .await?;
             }
             DbusEvent::OutgoingSmsUpdated { modem_id, info } => {
-                self.handle_outgoing_sms_update(modem_id, info).await?;
+                if self.allow_outgoing_sms {
+                    self.handle_outgoing_sms_update(modem_id, info).await?;
+                }
             }
             DbusEvent::ModemDeleted { modem_id } => {
                 self.handle_modem_deleted(modem_id).await?;
@@ -104,6 +108,9 @@ impl MqttFrontend {
         dbus_command_tx: Option<&mpsc::Sender<DbusCommand>>,
     ) -> Result<()> {
         if let Some(modem_index) = parse_outgoing_sms_recipient_topic(&publish.topic) {
+            if !self.allow_outgoing_sms {
+                return Ok(());
+            }
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
                 return Ok(());
             };
@@ -118,16 +125,7 @@ impl MqttFrontend {
             };
 
             if let Some(modem) = self.state.modems.get_mut(&modem_id) {
-                let trimmed = payload.trim();
-                let mut chars = trimmed.chars();
-                let has_leading_plus = matches!(chars.next(), Some('+'));
-                let digits: String = trimmed.chars().filter(|ch| ch.is_ascii_digit()).collect();
-                let sanitized = if has_leading_plus {
-                    format!("+{digits}")
-                } else {
-                    digits
-                };
-
+                let sanitized = crate::domain::sanitize_phone_number(payload);
                 modem.outgoing_sms_state.set_recipient(sanitized);
             }
             self.sync_modem_outgoing_sms_state(&modem_id).await?;
@@ -135,6 +133,9 @@ impl MqttFrontend {
         }
 
         if let Some(modem_index) = parse_outgoing_sms_text_topic(&publish.topic) {
+            if !self.allow_outgoing_sms {
+                return Ok(());
+            }
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
                 return Ok(());
             };
@@ -156,6 +157,9 @@ impl MqttFrontend {
         }
 
         if let Some(modem_index) = parse_check_phone_format_topic(&publish.topic) {
+            if !self.allow_outgoing_sms {
+                return Ok(());
+            }
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
                 return Ok(());
             };
@@ -193,6 +197,9 @@ impl MqttFrontend {
         }
 
         if let Some(modem_index) = parse_send_sms_topic(&publish.topic) {
+            if !self.allow_outgoing_sms {
+                return Ok(());
+            }
             let Some(modem_id) = self.state.modem_id_for_index(modem_index).cloned() else {
                 return Ok(());
             };
@@ -362,7 +369,7 @@ impl MqttFrontend {
 
         self.publisher.cleanup_modem_device(modem_index).await?;
         self.sync_main_sms_state().await?;
-        info!(
+        debug!(
             target: logstrings::LOG_TARGET,
             "{}",
             logstrings::mqtt_delete_modem_device_message(modem_index, &modem_id.0)
@@ -655,15 +662,17 @@ impl MqttFrontend {
 
         self.publisher.publish_modems_unavailable(modems).await?;
 
-        for (modem_id, modem) in &self.state.modems {
-            self.publisher
-                .sync_modem_outgoing_sms_state(
-                    modem_id,
-                    modem.index,
-                    &modem.outgoing_sms_state,
-                    false,
-                )
-                .await?;
+        if self.allow_outgoing_sms {
+            for (modem_id, modem) in &self.state.modems {
+                self.publisher
+                    .sync_modem_outgoing_sms_state(
+                        modem_id,
+                        modem.index,
+                        &modem.outgoing_sms_state,
+                        false,
+                    )
+                    .await?;
+            }
         }
 
         Ok(())
@@ -683,6 +692,10 @@ impl MqttFrontend {
     }
 
     async fn sync_modem_outgoing_sms_state(&mut self, modem_id: &ModemId) -> Result<()> {
+        if !self.allow_outgoing_sms {
+            return Ok(());
+        }
+
         let Some(modem) = self.state.modems.get(modem_id) else {
             return Ok(());
         };

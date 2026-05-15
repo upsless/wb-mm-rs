@@ -1,0 +1,4 @@
+# target config for Embedded Computer with armv7l arch
+[target.armv7-unknown-linux-gnueabi]
+linker = "arm-linux-gnueabi-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
