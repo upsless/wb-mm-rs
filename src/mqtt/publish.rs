@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, QoS};
 use std::collections::HashSet;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::debug;
 
+use crate::common::AppConfig;
 use crate::dbus::{
     ManagerStatus, ModemId, ModemInfo, ModemUpdate, SmsPropertyChange, SmsSnapshot, SmsUpdate,
 };
@@ -24,8 +26,8 @@ pub(super) struct WbSwitch(bool);
 
 pub(super) struct MqttPublisher {
     client: AsyncClient,
+    config: Arc<AppConfig>,
     state: MqttPublishState,
-    allow_outgoing_sms: bool,
 }
 
 #[derive(Default)]
@@ -115,11 +117,11 @@ where
 }
 
 impl MqttPublisher {
-    pub(super) fn new(client: AsyncClient, allow_outgoing_sms: bool) -> Self {
+    pub(super) fn new(client: AsyncClient, config: Arc<AppConfig>) -> Self {
         Self {
             client,
+            config,
             state: MqttPublishState::default(),
-            allow_outgoing_sms,
         }
     }
 
@@ -290,7 +292,7 @@ impl MqttPublisher {
         }
 
         self.subscribe_to_modem_sms_controls(modem_index).await?;
-        if !self.allow_outgoing_sms {
+        if !self.config.allow_outgoing_sms() {
             let device_name = schema::device_name_for_modem(modem_index);
             for spec in schema::modem_outgoing_sms_control_specs() {
                 self.cleanup_control(&device_name, spec).await?;
@@ -299,7 +301,7 @@ impl MqttPublisher {
         self.publish_modem_sms_structure(modem_index).await?;
 
         let device_name = schema::device_name_for_modem(modem_index);
-        if self.allow_outgoing_sms {
+        if self.config.allow_outgoing_sms() {
             self.publish_last_sent_sms(modem_index, None).await?;
             self.publish_outgoing_sms_draft(&device_name, "", "")
                 .await?;
@@ -346,7 +348,7 @@ impl MqttPublisher {
         }
 
         let device_name = schema::device_name_for_modem(modem_index);
-        if self.allow_outgoing_sms {
+        if self.config.allow_outgoing_sms() {
             for control_name in [
                 schema::MODEM_CONTROL_OUTGOING_SMS_RECIPIENT,
                 schema::MODEM_CONTROL_OUTGOING_SMS_TEXT,
@@ -411,7 +413,7 @@ impl MqttPublisher {
 
     async fn publish_modem_sms_structure(&self, modem_index: u32) -> Result<()> {
         let device_name = schema::device_name_for_modem(modem_index);
-        if self.allow_outgoing_sms {
+        if self.config.allow_outgoing_sms() {
             for spec in schema::modem_outgoing_sms_control_specs() {
                 self.publish_control_metadata(&device_name, spec).await?;
             }
@@ -600,7 +602,7 @@ impl MqttPublisher {
         outgoing_sms: &MqttOutgoingSmsState,
         send_allowed: bool,
     ) -> Result<()> {
-        if !self.allow_outgoing_sms {
+        if !self.config.allow_outgoing_sms() {
             return Ok(());
         }
 

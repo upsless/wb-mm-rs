@@ -12,6 +12,7 @@ use zbus::{
 use super::connection::emit_event;
 use super::logstrings;
 use super::sms::SmsInventoryWatcher;
+use crate::common::DBUS_MODEM_COMMAND_CHANNEL_CAPACITY;
 use crate::dbus::schema;
 use crate::domain::DbusEvent;
 
@@ -26,7 +27,7 @@ impl ModemWatcher {
         connection: Connection,
         event_tx: mpsc::Sender<DbusEvent>,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::channel(16);
+        let (command_tx, command_rx) = mpsc::channel(DBUS_MODEM_COMMAND_CHANNEL_CAPACITY);
         let worker = ModemWatcherWorker {
             id: id.clone(),
             connection: connection.clone(),

@@ -14,7 +14,7 @@ use zbus::{
 
 use super::connection::emit_event;
 use super::logstrings;
-use crate::common::AppConfig;
+use crate::common::{AppConfig, DBUS_SMS_INVENTORY_COMMAND_CHANNEL_CAPACITY};
 use crate::dbus::schema;
 use crate::domain::{DbusEvent, SmsInventoryEntry};
 
@@ -40,7 +40,7 @@ impl SmsInventoryWatcher {
         modem_id: schema::ModemId,
         event_tx: mpsc::Sender<DbusEvent>,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::channel(16);
+        let (command_tx, command_rx) = mpsc::channel(DBUS_SMS_INVENTORY_COMMAND_CHANNEL_CAPACITY);
         let task = Some(spawn_modem_sms_task(
             connection, modem_id, event_tx, command_rx,
         ));
@@ -682,7 +682,7 @@ pub(super) async fn send_sms(
     text: &str,
     config: &AppConfig,
 ) -> Result<()> {
-    if !config.allow_outgoing_sms {
+    if !config.allow_outgoing_sms() {
         anyhow::bail!("SMS sending is not allowed by configuration");
     }
 

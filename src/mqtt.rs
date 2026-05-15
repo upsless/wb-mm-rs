@@ -31,7 +31,7 @@ pub async fn run_lifecycle(
 ) -> Result<()> {
     let mqtt_options = build_mqtt_options(config.mqtt_address())?;
     let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_REQUEST_QUEUE_CAPACITY);
-    let mut frontend = MqttFrontend::new(client.clone(), config.allow_outgoing_sms);
+    let mut frontend = MqttFrontend::new(client.clone(), config.clone());
     let (eventloop_stop_tx, eventloop_stop_rx) = watch::channel(false);
     let (incoming_publish_tx, mut incoming_publish_rx) =
         mpsc::channel(MQTT_INCOMING_CHANNEL_CAPACITY);

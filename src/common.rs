@@ -6,13 +6,27 @@ use tokio::time::Duration;
 /// long-lived runtime components.
 #[derive(Debug, Clone, Default)]
 pub struct AppConfig {
-    pub dbus_address: Option<String>,
-    pub mqtt_address: Option<String>,
-    pub allow_outgoing_sms: bool,
-    pub log_level: Option<String>,
+    dbus_address: Option<String>,
+    mqtt_address: Option<String>,
+    allow_outgoing_sms: bool,
+    log_level: Option<String>,
 }
 
 impl AppConfig {
+    pub fn new(
+        dbus_address: Option<String>,
+        mqtt_address: Option<String>,
+        allow_outgoing_sms: bool,
+        log_level: Option<String>,
+    ) -> Self {
+        Self {
+            dbus_address,
+            mqtt_address,
+            allow_outgoing_sms,
+            log_level,
+        }
+    }
+
     pub fn dbus_address(&self) -> Option<&str> {
         self.dbus_address.as_deref()
     }
@@ -23,6 +37,10 @@ impl AppConfig {
 
     pub fn log_level(&self) -> Option<&str> {
         self.log_level.as_deref()
+    }
+
+    pub fn allow_outgoing_sms(&self) -> bool {
+        self.allow_outgoing_sms
     }
 }
 
@@ -37,6 +55,10 @@ pub const MQTT_RECONNECT_FAST_ATTEMPTS: u32 = 24;
 pub const DBUS_EVENT_CHANNEL_CAPACITY: usize = 32;
 /// Capacity of the per-session DBus command channel exposed to MQTT.
 pub const DBUS_COMMAND_CHANNEL_CAPACITY: usize = 32;
+/// Capacity of the command channel that drives each modem watcher task.
+pub const DBUS_MODEM_COMMAND_CHANNEL_CAPACITY: usize = 16;
+/// Capacity of the command channel that drives each modem SMS inventory task.
+pub const DBUS_SMS_INVENTORY_COMMAND_CHANNEL_CAPACITY: usize = 16;
 /// Capacity of the rumqttc request queue used by the MQTT client.
 pub const MQTT_REQUEST_QUEUE_CAPACITY: usize = 16;
 /// Capacity of the channel that forwards incoming MQTT publishes from the event loop.

@@ -1,5 +1,5 @@
-use clap::Parser;
 use clap::ArgAction;
+use clap::Parser;
 
 use crate::common::AppConfig;
 
@@ -40,11 +40,11 @@ pub struct Cli {
 
 impl From<Cli> for AppConfig {
     fn from(value: Cli) -> Self {
-        Self {
-            dbus_address: value.dbus_address,
-            mqtt_address: value.mqtt_address,
-            allow_outgoing_sms: value.allow_outgoing_sms,
-            log_level: value.log_level,
-        }
+        AppConfig::new(
+            value.dbus_address,
+            value.mqtt_address,
+            value.allow_outgoing_sms,
+            value.log_level,
+        )
     }
 }
