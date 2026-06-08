@@ -113,6 +113,9 @@ incoming SMS picker model:
   lifecycle and constructor surfaces instead of being hidden behind a shared
   config object. This keeps dependencies explicit and gives tests the freedom
   to wire only the values relevant to each subsystem.
+- A minimal JSON config file is now supported at `/etc/wb-mm-mqtt.conf`.
+  Currently it only covers `logLevel` and `allowOutgoingSms`; CLI flags still
+  override file values.
 
 The current mental model is:
 
@@ -257,6 +260,11 @@ Planned rule:
 - future command calls / DTMF sessions are also handled at Core level;
 - MQTT may optionally receive only a coarse status such as "incoming
   controller" for command calls, but not command payload/details.
+
+Operational constraint: command SMS are expected to fit into one SMS. Multipart
+or still-incomplete SMS objects are not considered a reliable command transport
+because some modem/operator combinations may leave them stuck in `receiving`
+for a long time and only recover after a modem restart.
 
 This keeps the operational command channel alive even when the MQTT frontend is
 down or intentionally unavailable.

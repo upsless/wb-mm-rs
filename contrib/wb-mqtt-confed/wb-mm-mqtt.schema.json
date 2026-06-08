@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "title": "wb-mm-mqtt configuration",
+  "description": "WirenBoard ModemManager MQTT bridge settings",
+  "configFile": {
+    "path": "/etc/wb-mm-mqtt.conf",
+    "service": "wb-mm-mqtt"
+  },
+  "properties": {
+    "logLevel": {
+      "type": "string",
+      "title": "log_level_title",
+      "description": "log_level_description",
+      "default": "info",
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "propertyOrder": 1
+    },
+    "allowOutgoingSms": {
+      "type": "boolean",
+      "title": "allow_outgoing_sms_title",
+      "description": "allow_outgoing_sms_description",
+      "default": false,
+      "_format": "checkbox",
+      "propertyOrder": 2
+    }
+  },
+  "required": [
+    "allowOutgoingSms"
+  ],
+  "translations": {
+    "en": {
+      "log_level_title": "Log level",
+      "log_level_description": "Runtime log verbosity for wb-mm-mqtt",
+      "allow_outgoing_sms_title": "Allow outgoing SMS",
+      "allow_outgoing_sms_description": "Enable MQTT/UI outgoing SMS controls and DBus send path"
+    },
+    "ru": {
+      "log_level_title": "Уровень логирования",
+      "log_level_description": "Подробность логов wb-mm-mqtt",
+      "allow_outgoing_sms_title": "Разрешить исходящие СМС",
+      "allow_outgoing_sms_description": "Включить исходящие СМС через MQTT/UI и DBus send path"
+    }
+  }
+}

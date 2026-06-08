@@ -10,6 +10,12 @@ use clap::Parser;
 pub struct Cli {
     #[arg(
         long,
+        help = "Path to JSON config file (default: /etc/wb-mm-mqtt.conf)"
+    )]
+    pub config: Option<String>,
+
+    #[arg(
+        long,
         help = "Remote DBus address to connect to (default: local system bus)"
     )]
     pub dbus_address: Option<String>,

@@ -35,6 +35,10 @@ shared vocabulary:
   function parameters and constructors instead of being stored in a shared
   runtime config object. This keeps subsystem dependencies explicit and makes
   isolated tests easier to wire.
+- A minimal JSON runtime config is now supported at `/etc/wb-mm-mqtt.conf`.
+  Today it only carries `logLevel` and `allowOutgoingSms`; CLI flags override
+  file values. Example `wb-mqtt-confed` schema and config files live under
+  `contrib/wb-mqtt-confed/`.
 
 Today MQTT is still the primary lifecycle gate. If MQTT is disconnected, DBus
 work is stopped and runtime state is dropped until MQTT reconnects.
@@ -179,6 +183,10 @@ degraded mode where:
   command calls, not command payload/details.
 - Outbound requests initiated from MQTT must be checked against the send list
   in Core even if the UI already disables invalid actions.
+- Treat command SMS as single-part only. Multipart or still-incomplete SMS
+  messages are not a reliable command transport on current hardware/operator
+  paths: they may remain stuck in `receiving` with empty text for a long time
+  and sometimes recover only after a modem restart.
 
 ### Persistence and Logging
 
@@ -495,18 +503,22 @@ Unit tests for MQTT state live in `src/mqtt/state/tests.rs`, not inline inside
    `AT+CPMS="ME","ME","ME"` caused the modem to rediscover today's SMS after a
    reboot-like transition, but the daemon should not rely on manual console
    state.
-10. Continue reducing MQTT SMS handler complexity:
+10. Think through a modem reboot action exposed as an MQTT button:
+   - decide whether it should call an existing WB service, a DBus action, or a
+     modem-level AT/reset path;
+   - define the expected safety checks and user-visible behavior.
+11. Continue reducing MQTT SMS handler complexity:
    - review `apply_sms_deleted`, `pick_modem_sms`, and `delete_picked_sms` for
      the same state/frontend split used in `handle_sms_list`;
    - consider clearer method names after behavior settles.
-11. Re-check the stale `last_published_sms_id` policy after more cleanup:
+12. Re-check the stale `last_published_sms_id` policy after more cleanup:
    - current rule is "only accepted snapshots change it";
    - if the selected-SMS fields are cleared because the list is empty or the
      displayed SMS disappeared, decide whether an explicit state method should
      also set `last_published_sms_id=None`.
-12. Verify live SMS add/delete/change behavior on a working SIM.
-13. Add focused tests around reconnect/lifecycle ordering where practical.
-14. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
+13. Verify live SMS add/delete/change behavior on a working SIM.
+14. Add focused tests around reconnect/lifecycle ordering where practical.
+15. Keep WB MQTT semantics and Last Will behavior intact while tightening topic
    metadata and UI details.
 
 ## Recent DBus Cleanup Notes

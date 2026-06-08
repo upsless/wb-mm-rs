@@ -1,5 +1,6 @@
 mod cli;
 mod common;
+mod config;
 mod dbus;
 mod domain;
 mod mqtt;
@@ -18,19 +19,19 @@ use crate::common::{
     DBUS_EVENT_CHANNEL_CAPACITY, MQTT_RECONNECT_FAST_ATTEMPTS, MQTT_RECONNECT_FAST_INTERVAL,
     MQTT_RECONNECT_SLOW_INTERVAL, wait_for_shutdown,
 };
+use crate::config::RuntimeSettings;
 use crate::domain::DbusCommand;
 
 const LOG_TARGET: &str = "MAIN";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Cli {
+    let RuntimeSettings {
         dbus_address,
         mqtt_address,
         log_level,
         allow_outgoing_sms,
-        ..
-    } = Cli::parse();
+    } = RuntimeSettings::load(Cli::parse())?;
     init_logging(log_level.as_deref())?;
 
     info!(target: LOG_TARGET, "Starting wb-mm-mqtt");

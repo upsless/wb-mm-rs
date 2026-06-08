@@ -236,14 +236,6 @@ impl SmsInventoryWorker {
 
         let previous_sms_ids: HashSet<_> = inventory_cache.keys().cloned().collect();
         let current_sms_ids: HashSet<_> = sms_ids.iter().cloned().collect();
-        let removed_sms_ids = previous_sms_ids
-            .difference(&current_sms_ids)
-            .cloned()
-            .collect::<Vec<_>>();
-        let added_sms_ids = current_sms_ids
-            .difference(&previous_sms_ids)
-            .cloned()
-            .collect::<Vec<_>>();
         inventory_cache.retain(|sms_id, _| current_sms_ids.contains(sms_id));
 
         for sms_id in &sms_ids {
@@ -260,7 +252,17 @@ impl SmsInventoryWorker {
         let entries = sms_ids
             .iter()
             .filter_map(|sms_id| inventory_cache.get(sms_id).cloned())
-            .collect();
+            .collect::<Vec<_>>();
+        let current_inventory_sms_ids: HashSet<_> =
+            entries.iter().map(|entry| entry.sms_id.clone()).collect();
+        let removed_sms_ids = previous_sms_ids
+            .difference(&current_inventory_sms_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_sms_ids = current_inventory_sms_ids
+            .difference(&previous_sms_ids)
+            .cloned()
+            .collect::<Vec<_>>();
         Ok((entries, added_sms_ids, removed_sms_ids))
     }
 }
